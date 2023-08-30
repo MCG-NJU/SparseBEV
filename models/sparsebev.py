@@ -243,7 +243,6 @@ class SparseBEV(MVXTwoStageDetector):
             return self.simple_test_offline(img_metas, img, rescale)
 
     def simple_test_offline(self, img_metas, img=None, rescale=False):
-        self.fp16_enabled = False
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
 
         bbox_list = [dict() for _ in range(len(img_metas))]
