@@ -1,4 +1,4 @@
-_base_ = ['./r50_nuimg_704x256_400q_36ep.py']
+_base_ = ['./r50_nuimg_704x256.py']
 
 img_backbone = dict(pretrained='torchvision://resnet50')
 

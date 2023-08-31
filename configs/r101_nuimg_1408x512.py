@@ -1,4 +1,4 @@
-_base_ = ['./r50_nuimg_704x256_400q_36ep.py']
+_base_ = ['./r50_nuimg_704x256.py']
 
 # For nuScenes we usually do 10-class detection
 class_names = [
@@ -27,9 +27,7 @@ img_neck = dict(
 model = dict(
     img_backbone=img_backbone,
     img_neck=img_neck,
-    pts_bbox_head=dict(
-        num_query=900,
-        transformer=dict(num_levels=5)),
+    pts_bbox_head=dict(transformer=dict(num_levels=5)),
 )
 
 ida_aug_conf = {
@@ -91,6 +89,3 @@ optimizer = dict(
 # load pretrained weights
 load_from = 'pretrain/cascade_mask_rcnn_r101_fpn_1x_nuim_20201024_134804-45215b1e.pth'
 revise_keys = [('backbone', 'img_backbone')]
-
-total_epochs = 24
-eval_config = dict(interval=total_epochs)

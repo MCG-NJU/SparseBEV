@@ -4,11 +4,14 @@ This is the official PyTorch implementation for paper [SparseBEV: High-Performan
 
 ## Model Zoo
 
-| Backbone | Pretrain | Input Size | Epochs | Training Cost | NDS | FPS | Config | Weights |
-|----------|----------|------------|--------|---------------|-----|-----|--------|---------|
-| R50 | [nuImages](https://github.com/open-mmlab/mmdetection3d/blob/main/configs/nuimages/cascade-mask-rcnn_r50_fpn_coco-20e_20e_nuim.py) | 704x256 | 36 | 28h (8x2080Ti) | 55.8 | 23.5 | [config](configs/r50_nuimg_704x256_400q_36ep.py) | [weights](https://drive.google.com/file/d/1C_Vn3iiSnSW1Dw1r0DkjJMwvHC5Y3zTN/view?usp=sharing) |
+| Setting  | Pretrain | Training Cost | NDS | FPS | Config | Weights |
+|----------|----------|---------------|-----|-----|--------|---------|
+| r50_nuimg_704x256 | [nuImages](https://download.openmmlab.com/mmdetection3d/v0.1.0_models/nuimages_semseg/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth) | 21h (8x2080Ti) | 55.6 | 15.8 | [config](configs/r50_nuimg_704x256.py) | [weights](https://drive.google.com/file/d/1ft34-pxLpHGo2Aw-jowEtCxyXcqszHNn/view) |
+| r50_nuimg_704x256_400q_36ep | [nuImages](https://download.openmmlab.com/mmdetection3d/v0.1.0_models/nuimages_semseg/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth) | 28h (8x2080Ti) | 55.8 | 23.5 | [config](configs/r50_nuimg_704x256_400q_36ep.py) | [weights](https://drive.google.com/file/d/1C_Vn3iiSnSW1Dw1r0DkjJMwvHC5Y3zTN/view) |
 
-* FPS is measured on a machine with AMD 5800X and RTX 3090.
+* We use `r50_nuimg_704x256` for ablation studies and `r50_nuimg_704x256_400q_36ep` for comparison with others.
+* We recommend using `r50_nuimg_704x256` to validate new ideas since it trains faster and the result is more stable.
+* FPS is measured with AMD 5800X CPU and RTX 3090 GPU.
 * The noise is around 0.3 NDS.
 
 ## Environment
@@ -86,14 +89,14 @@ These `*.pkl` files can also be generated with our script: `gen_sweep_info.py`.
 Train SparseBEV with 8 GPUs:
 
 ```
-torchrun --nproc_per_node 8 train.py --config configs/r50_nuimg_704x256_400q_36ep.py
+torchrun --nproc_per_node 8 train.py --config configs/r50_nuimg_704x256.py
 ```
 
 Train SparseBEV with 4 GPUs (i.e the last four GPUs):
 
 ```
 export CUDA_VISIBLE_DEVICES=4,5,6,7
-torchrun --nproc_per_node 4 train.py --config configs/r50_nuimg_704x256_400q_36ep.py
+torchrun --nproc_per_node 4 train.py --config configs/r50_nuimg_704x256.py
 ```
 
 The batch size for each GPU will be scaled automatically. So there is no need to modify the `batch_size` in config files.
