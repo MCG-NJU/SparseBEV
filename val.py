@@ -13,6 +13,7 @@ from mmcv.runner import load_checkpoint
 from mmdet.apis import set_random_seed, multi_gpu_test, single_gpu_test
 from mmdet3d.datasets import build_dataset, build_dataloader
 from mmdet3d.models import build_model
+from models.utils import VERSION
 
 
 def evaluate(dataset, results, epoch):
@@ -117,20 +118,23 @@ def main():
     else:
         model = MMDataParallel(model, [0])
 
-    if os.path.isfile(args.weights):
-        logging.info('Loading checkpoint from %s' % args.weights)
-        load_checkpoint(
-            model, args.weights, map_location='cuda', strict=True,
-            logger=logging.Logger(__name__, logging.ERROR)
-        )
+    logging.info('Loading checkpoint from %s' % args.weights)
+    checkpoint = load_checkpoint(
+        model, args.weights, map_location='cuda', strict=True,
+        logger=logging.Logger(__name__, logging.ERROR)
+    )
 
-        if world_size > 1:
-            results = multi_gpu_test(model, val_loader, gpu_collect=True)
-        else:
-            results = single_gpu_test(model, val_loader)
+    if 'version' in checkpoint:
+        VERSION.name = checkpoint['version']
+        logging.info(VERSION.name)
 
-        if local_rank == 0:
-            evaluate(val_dataset, results, -1)
+    if world_size > 1:
+        results = multi_gpu_test(model, val_loader, gpu_collect=True)
+    else:
+        results = single_gpu_test(model, val_loader)
+
+    if local_rank == 0:
+        evaluate(val_dataset, results, -1)
 
 
 if __name__ == '__main__':

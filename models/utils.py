@@ -62,11 +62,18 @@ def rotation_3d_in_axis(points, angles):
     ones = torch.ones_like(rot_cos)
     zeros = torch.zeros_like(rot_cos)
 
-    rot_mat_T = torch.stack([
-        rot_cos, rot_sin, zeros,
-        -rot_sin, rot_cos, zeros,
-        zeros, zeros, ones,
-    ]).transpose(0, 1).reshape(-1, 3, 3)
+    if VERSION.name == 'v0.17.1':
+        rot_mat_T = torch.stack([
+            rot_cos, -rot_sin, zeros,
+            rot_sin, rot_cos, zeros,
+            zeros, zeros, ones,
+        ]).transpose(0, 1).reshape(-1, 3, 3)
+    else:
+        rot_mat_T = torch.stack([
+            rot_cos, rot_sin, zeros,
+            -rot_sin, rot_cos, zeros,
+            zeros, zeros, ones,
+        ]).transpose(0, 1).reshape(-1, 3, 3)
 
     points = torch.bmm(points, rot_mat_T)
 
@@ -307,3 +314,11 @@ class DumpConfig:
 
 
 DUMP = DumpConfig()
+
+
+# for backward compatibility
+class Version:
+    def __init__(self):
+        self.name = 'v1.0.0'
+
+VERSION = Version()

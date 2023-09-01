@@ -8,6 +8,7 @@ from mmdet.models.dense_heads import DETRHead
 from mmdet3d.core.bbox.coders import build_bbox_coder
 from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes
 from .bbox.utils import normalize_bbox, encode_bbox
+from .utils import VERSION
 
 
 @HEADS.register_module()
@@ -462,6 +463,13 @@ class SparseBEVHead(DETRHead):
             preds = preds_dicts[i]
             bboxes = preds['bboxes']
             bboxes[:, 2] = bboxes[:, 2] - bboxes[:, 5] * 0.5
+
+            if VERSION.name == 'v0.17.1':
+                import copy
+                w, l = copy.deepcopy(bboxes[:, 3]), copy.deepcopy(bboxes[:, 4])
+                bboxes[:, 3], bboxes[:, 4] = l, w
+                bboxes[:, 6] = -bboxes[:, 6] - math.pi / 2
+
             bboxes = LiDARInstance3DBoxes(bboxes, 9)
             scores = preds['scores']
             labels = preds['labels']
