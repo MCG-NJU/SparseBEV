@@ -12,27 +12,49 @@ point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.2, 0.2, 8]
 
 img_backbone = dict(
-    type='ResNet',
-    depth=101,
-    with_cp=True,
+    _delete_=True,
+    type='VoVNet',
+    spec_name='V-99-eSE',
+    out_features=['stage2', 'stage3', 'stage4', 'stage5'],
+    norm_eval=True,
+    frozen_stages=1,
+    with_cp=True
 )
-
-img_neck = dict(
+img_neck=dict(
+    _delete_=True,
     type='FPN',
-    in_channels=[256, 512, 1024, 2048],
+    in_channels=[256, 512, 768, 1024],
     out_channels=256,
-    num_outs=5,
+    num_outs=5
+)
+img_norm_cfg = dict(
+    _delete_=True,
+    mean=[103.530, 116.280, 123.675],
+    std=[57.375, 57.120, 58.395],
+    to_rgb=False
 )
 
 model = dict(
+    data_aug=dict(
+        img_color_aug=True,
+        img_norm_cfg=img_norm_cfg,
+        img_pad_cfg=dict(size_divisor=32)
+    ),
     img_backbone=img_backbone,
     img_neck=img_neck,
-    pts_bbox_head=dict(transformer=dict(num_levels=5)),
+    pts_bbox_head=dict(
+        num_query=1600,
+        transformer=dict(
+            num_levels=5,
+            num_points=4,
+            num_frames=15
+        )
+    )
 )
 
 ida_aug_conf = {
-    'resize_lim': (0.38 * 2, 0.55 * 2),
-    'final_dim': (512, 1408),
+    'resize_lim': (0.94, 1.25),
+    'final_dim': (640, 1600),
     'bot_pct_lim': (0.0, 0.0),
     'rot_lim': (0.0, 0.0),
     'H': 900, 'W': 1600,
@@ -41,7 +63,7 @@ ida_aug_conf = {
 
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
-    dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=7),
+    dict(type='LoadMultiViewImageFromMultiSweepsFuture', prev_sweeps_num=7, next_sweeps_num=7),
     dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
@@ -54,7 +76,7 @@ train_pipeline = [
 
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
-    dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=7, test_mode=True),
+    dict(type='LoadMultiViewImageFromMultiSweepsFuture', prev_sweeps_num=7, next_sweeps_num=7, test_mode=True),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=False),
     dict(
         type='MultiScaleFlipAug3D',
@@ -70,21 +92,16 @@ test_pipeline = [
 ]
 
 data = dict(
-    train=dict(pipeline=train_pipeline),
-    val=dict(pipeline=test_pipeline),
+    train=dict(
+        ann_file=['data/nuscenes/nuscenes_infos_train_sweep.pkl',
+                  'data/nuscenes/nuscenes_infos_val_sweep.pkl'],
+        pipeline=train_pipeline),
+    val=dict(
+        ann_file='data/nuscenes/nuscenes_infos_val_sweep.pkl',  # use nuscenes_infos_test_sweep.pkl for submission
+        pipeline=test_pipeline),
     test=dict(pipeline=test_pipeline)
 )
 
-optimizer = dict(
-    type='AdamW',
-    lr=2e-4,
-    paramwise_cfg=dict(custom_keys={
-        'img_backbone': dict(lr_mult=0.2),
-        'sampling_offset': dict(lr_mult=0.1),
-    }),
-    weight_decay=0.01
-)
-
 # load pretrained weights
-load_from = 'pretrain/cascade_mask_rcnn_r101_fpn_1x_nuim_20201024_134804-45215b1e.pth'
-revise_keys = [('backbone', 'img_backbone')]
+load_from = 'pretrain/dd3d_det_final.pth'
+revise_keys = None

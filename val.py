@@ -17,7 +17,7 @@ from models.utils import VERSION
 
 
 def evaluate(dataset, results, epoch):
-    metrics = dataset.evaluate(results, jsonfile_prefix=None)
+    metrics = dataset.evaluate(results, jsonfile_prefix='submission')
 
     mAP = metrics['pts_bbox_NuScenes/mAP']
     mATE = metrics['pts_bbox_NuScenes/mATE']
@@ -126,7 +126,6 @@ def main():
 
     if 'version' in checkpoint:
         VERSION.name = checkpoint['version']
-        logging.info(VERSION.name)
 
     if world_size > 1:
         results = multi_gpu_test(model, val_loader, gpu_collect=True)
