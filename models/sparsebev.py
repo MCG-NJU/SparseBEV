@@ -239,7 +239,7 @@ class SparseBEV(MVXTwoStageDetector):
         world_size = get_dist_info()[1]
         if world_size == 1:  # online
             return self.simple_test_online(img_metas, img, rescale)
-        elif world_size > 1:  # offline
+        else:  # offline
             return self.simple_test_offline(img_metas, img, rescale)
 
     def simple_test_offline(self, img_metas, img=None, rescale=False):
@@ -273,23 +273,21 @@ class SparseBEV(MVXTwoStageDetector):
         for i in range(num_frames):
             img_indices = list(np.arange(i * 6, (i + 1) * 6))
 
-            img_curr_large = img[:, 0]  # [B, 6, C, H, W]
-            img_metas_curr_large = [{}]
-
+            img_metas_curr = [{}]
             for k in img_metas[0].keys():
                 if isinstance(img_metas[0][k], list):
-                    img_metas_curr_large[0][k] = [img_metas[0][k][i] for i in img_indices]
+                    img_metas_curr[0][k] = [img_metas[0][k][i] for i in img_indices]
 
             if img_filenames[img_indices[0]] in self.memory:
-                img_feats_curr_large = self.memory[img_filenames[img_indices[0]]]
+                img_feats_curr = self.memory[img_filenames[img_indices[0]]]
             else:
-                # assert i == 0
-                img_feats_curr_large = self.extract_feat(img_curr_large, img_metas_curr_large)
-                self.memory[img_filenames[img_indices[0]]] = img_feats_curr_large
+                img_curr_large = img[:, i]  # [B, 6, C, H, W]
+                img_feats_curr = self.extract_feat(img_curr_large, img_metas_curr)
+                self.memory[img_filenames[img_indices[0]]] = img_feats_curr
                 self.queue.put(img_filenames[img_indices[0]])
 
-            img_feats_large.append(img_feats_curr_large)
-            img_metas_large.append(img_metas_curr_large)
+            img_feats_large.append(img_feats_curr)
+            img_metas_large.append(img_metas_curr)
 
         # reorganize
         feat_levels = len(img_feats_large[0])
@@ -314,7 +312,7 @@ class SparseBEV(MVXTwoStageDetector):
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
 
-        while self.queue.qsize() >= 8:
+        while self.queue.qsize() >= 16:
             pop_key = self.queue.get()
             self.memory.pop(pop_key)
 
