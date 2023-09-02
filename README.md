@@ -87,6 +87,14 @@ These `*.pkl` files can also be generated with our script: `gen_sweep_info.py`.
 
 ## Training
 
+Download pretrained weights and put it in directory `pretrain/`:
+
+```
+pretrain
+├── cascade_mask_rcnn_r101_fpn_1x_nuim_20201024_134804-45215b1e.pth
+├── cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth
+```
+
 Train SparseBEV with 8 GPUs:
 
 ```

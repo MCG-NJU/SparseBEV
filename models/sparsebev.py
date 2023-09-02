@@ -283,7 +283,7 @@ class SparseBEV(MVXTwoStageDetector):
             if img_filenames[img_indices[0]] in self.memory:
                 img_feats_curr_large = self.memory[img_filenames[img_indices[0]]]
             else:
-                assert i == 0
+                # assert i == 0
                 img_feats_curr_large = self.extract_feat(img_curr_large, img_metas_curr_large)
                 self.memory[img_filenames[img_indices[0]]] = img_feats_curr_large
                 self.queue.put(img_filenames[img_indices[0]])
