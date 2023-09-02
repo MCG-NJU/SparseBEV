@@ -92,7 +92,6 @@ test_pipeline = [
 ]
 
 data = dict(
-    workers_per_gpu=6,
     train=dict(
         ann_file=['data/nuscenes/nuscenes_infos_train_sweep.pkl',
                   'data/nuscenes/nuscenes_infos_val_sweep.pkl'],

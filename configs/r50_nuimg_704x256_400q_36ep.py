@@ -6,3 +6,5 @@ model = dict(
 
 total_epochs = 36
 eval_config = dict(interval=total_epochs)
+
+data = dict(workers_per_gpu=12)
