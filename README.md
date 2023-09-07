@@ -2,6 +2,8 @@
 
 This is the official PyTorch implementation for paper [SparseBEV: High-Performance Sparse 3D Object Detection from Multi-Camera Videos](https://arxiv.org/abs/2308.09244). (ICCV 2023)
 
+中文解读：[https://zhuanlan.zhihu.com/p/654821380](https://zhuanlan.zhihu.com/p/654821380)
+
 ## Model Zoo
 
 | Setting  | Pretrain | Training Cost | NDS<sub>val</sub> | NDS<sub>test</sub> | FPS | Weights |
