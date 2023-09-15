@@ -43,6 +43,7 @@ class SparseBEVTransformerDecoder(BaseModule):
         self.num_layers = num_layers
         self.pc_range = pc_range
 
+        # params are shared across all decoder layers
         self.decoder_layer = SparseBEVTransformerDecoderLayer(
             embed_dims, num_frames, num_points, num_levels, num_classes, code_size, pc_range=pc_range
         )
@@ -54,6 +55,7 @@ class SparseBEVTransformerDecoder(BaseModule):
     def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
         cls_scores, bbox_preds = [], []
 
+        # calculate time difference according to timestamps
         timestamps = np.array([m['img_timestamp'] for m in img_metas], dtype=np.float64)
         timestamps = np.reshape(timestamps, [query_bbox.shape[0], -1, 6])
         time_diff = timestamps[:, :1, :] - timestamps
@@ -61,10 +63,12 @@ class SparseBEVTransformerDecoder(BaseModule):
         time_diff = torch.from_numpy(time_diff).to(query_bbox.device)  # [B, F]
         img_metas[0]['time_diff'] = time_diff
 
+        # organize projections matrix and copy to CUDA
         lidar2img = np.asarray([m['lidar2img'] for m in img_metas]).astype(np.float32)
         lidar2img = torch.from_numpy(lidar2img).to(query_bbox.device)  # [B, N, 4, 4]
         img_metas[0]['lidar2img'] = lidar2img
 
+        # group image features in advance for sampling, see `sampling_4d` for more details
         for lvl, feat in enumerate(mlvl_feats):
             B, TN, GC, H, W = feat.shape  # [B, TN, GC, H, W]
             N, T, G, C = 6, TN // 6, 4, GC // 4
@@ -164,6 +168,7 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
         bbox_pred = self.reg_branch(query_feat)  # [B, Q, code_size]
         bbox_pred = self.refine_bbox(query_bbox, bbox_pred)
 
+        # calculate absolute velocity according to time difference
         time_diff = img_metas[0]['time_diff']  # [B, F]
         if time_diff.shape[1] > 1:
             time_diff = time_diff.clone()
@@ -182,6 +187,7 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
 
 
 class SparseBEVSelfAttention(BaseModule):
+    """Scale-adaptive Self Attention"""
     def __init__(self, embed_dims=256, num_heads=8, dropout=0.1, pc_range=[], init_cfg=None):
         super().__init__(init_cfg)
         self.pc_range = pc_range
@@ -207,8 +213,10 @@ class SparseBEVSelfAttention(BaseModule):
 
         tau = tau.permute(0, 2, 1)  # [B, 8, Q]
         attn_mask = dist[:, None, :, :] * tau[..., None]  # [B, 8, Q, Q]
-        if pre_attn_mask is not None:
+
+        if pre_attn_mask is not None:  # for query denoising
             attn_mask[:, :, pre_attn_mask] = float('-inf')
+
         attn_mask = attn_mask.flatten(0, 1)  # [Bx8, Q, Q]
         return self.attention(query_feat, attn_mask=attn_mask)
 
@@ -234,6 +242,7 @@ class SparseBEVSelfAttention(BaseModule):
 
 
 class SparseBEVSampling(BaseModule):
+    """Adaptive Spatio-temporal Sampling"""
     def __init__(self, embed_dims=256, num_frames=4, num_groups=4, num_points=8, num_levels=4, pc_range=[], init_cfg=None):
         super().__init__(init_cfg)
 
@@ -302,6 +311,7 @@ class SparseBEVSampling(BaseModule):
 
 
 class AdaptiveMixing(nn.Module):
+    """Adaptive Mixing"""
     def __init__(self, in_dim, in_points, n_groups=1, query_dim=None, out_dim=None, out_points=None):
         super(AdaptiveMixing, self).__init__()
 

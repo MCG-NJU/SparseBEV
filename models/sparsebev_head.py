@@ -70,6 +70,7 @@ class SparseBEVHead(DETRHead):
         query_bbox = self.init_query_bbox.weight.clone()  # [Q, 10]
         #query_bbox[..., :3] = query_bbox[..., :3].sigmoid()
 
+        # query denoising
         B = mlvl_feats[0].shape[0]
         query_bbox, query_feat, attn_mask, mask_dict = self.prepare_for_dn_input(B, query_bbox, self.label_enc, img_metas)
 
@@ -92,7 +93,7 @@ class SparseBEVHead(DETRHead):
             bbox_preds[..., 5:10],
         ], dim=-1)  # [cx, cy, w, l, cz, h, sin, cos, vx, vy]
 
-        if mask_dict is not None and mask_dict['pad_size'] > 0:
+        if mask_dict is not None and mask_dict['pad_size'] > 0:  # if using query denoising
             output_known_cls_scores = cls_scores[:, :, :mask_dict['pad_size'], :]
             output_known_bbox_preds = bbox_preds[:, :, :mask_dict['pad_size'], :]
             output_cls_scores = cls_scores[:, :, mask_dict['pad_size']:, :]
@@ -116,6 +117,10 @@ class SparseBEVHead(DETRHead):
         return outs
 
     def prepare_for_dn_input(self, batch_size, init_query_bbox, label_enc, img_metas):
+        # mostly borrowed from:
+        #  - https://github.com/IDEA-Research/DN-DETR/blob/main/models/DN_DAB_DETR/dn_components.py
+        #  - https://github.com/megvii-research/PETR/blob/main/projects/mmdet3d_plugin/models/dense_heads/petrv2_dnhead.py
+
         device = init_query_bbox.device
         indicator0 = torch.zeros([self.num_query, 1], device=device)
         init_query_feat = label_enc.weight[self.num_classes].repeat(self.num_query, 1)
