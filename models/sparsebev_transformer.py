@@ -10,6 +10,7 @@ from .bbox.utils import decode_bbox
 from .utils import inverse_sigmoid, DUMP
 from .sparsebev_sampling import sampling_4d, make_sample_points
 from .checkpoint import checkpoint as cp
+from .csrc.wrapper import MSMV_CUDA
 
 
 @TRANSFORMER.register_module()
@@ -73,8 +74,14 @@ class SparseBEVTransformerDecoder(BaseModule):
             B, TN, GC, H, W = feat.shape  # [B, TN, GC, H, W]
             N, T, G, C = 6, TN // 6, 4, GC // 4
             feat = feat.reshape(B, T, N, G, C, H, W)
-            feat = feat.permute(0, 1, 3, 2, 5, 6, 4)  # [B, T, G, N, H, W, C]
-            feat = feat.reshape(B*T*G, N, H, W, C)  # [BTG, C, N, H, W]
+
+            if MSMV_CUDA:  # Our CUDA operator requires channel_last
+                feat = feat.permute(0, 1, 3, 2, 5, 6, 4)  # [B, T, G, N, H, W, C]
+                feat = feat.reshape(B*T*G, N, H, W, C)
+            else:  # Torch's grid_sample requires channel_first
+                feat = feat.permute(0, 1, 3, 4, 2, 5, 6)  # [B, T, G, C, N, H, W]
+                feat = feat.reshape(B*T*G, C, N, H, W)
+
             mlvl_feats[lvl] = feat.contiguous()
 
         for i in range(self.num_layers):

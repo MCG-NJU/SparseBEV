@@ -1,7 +1,14 @@
 import torch
 import torch.nn.functional as F
-from ._msmv_sampling_cuda import _ms_deform_attn_cuda_c2345_forward, _ms_deform_attn_cuda_c2345_backward
-from ._msmv_sampling_cuda import _ms_deform_attn_cuda_c23456_forward, _ms_deform_attn_cuda_c23456_backward
+
+try:
+    from ._msmv_sampling_cuda import _ms_deform_attn_cuda_c2345_forward, _ms_deform_attn_cuda_c2345_backward
+    from ._msmv_sampling_cuda import _ms_deform_attn_cuda_c23456_forward, _ms_deform_attn_cuda_c23456_backward
+    MSMV_CUDA = True
+except ImportError as e:
+    print('Warning: failed to load one or more CUDA extensions, performance may be hurt.')
+    print('Error message:', e)
+    MSMV_CUDA = False
 
 
 def msmv_sampling_pytorch(mlvl_feats, sampling_locations, scale_weights):
@@ -12,7 +19,7 @@ def msmv_sampling_pytorch(mlvl_feats, sampling_locations, scale_weights):
     """
     assert scale_weights.shape[-1] == len(mlvl_feats)
 
-    B, _, _, _, C = mlvl_feats[0].shape
+    B, C, _, _, _ = mlvl_feats[0].shape
     _, Q, P, _ = sampling_locations.shape
 
     sampling_locations = sampling_locations * 2 - 1
@@ -21,7 +28,6 @@ def msmv_sampling_pytorch(mlvl_feats, sampling_locations, scale_weights):
     final = torch.zeros([B, C, Q, P], device=mlvl_feats[0].device)
 
     for lvl, feat in enumerate(mlvl_feats):
-        feat = feat.permute(0, 4, 1, 2, 3)
         out = F.grid_sample(
             feat, sampling_locations, mode='bilinear',
             padding_mode='zeros', align_corners=True,
@@ -79,9 +85,9 @@ class MSMVSamplingC23456(torch.autograd.Function):
 
 
 def msmv_sampling(mlvl_feats, sampling_locations, scale_weights):
-    if len(mlvl_feats) == 4:
+    if len(mlvl_feats) == 4 and MSMV_CUDA:
         return MSMVSamplingC2345.apply(*mlvl_feats, sampling_locations, scale_weights)
-    elif len(mlvl_feats) == 5:
+    elif len(mlvl_feats) == 5 and MSMV_CUDA:
         return MSMVSamplingC23456.apply(*mlvl_feats, sampling_locations, scale_weights)
     else:
         return msmv_sampling_pytorch(mlvl_feats, sampling_locations, scale_weights)
