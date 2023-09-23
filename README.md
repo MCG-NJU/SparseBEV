@@ -1,8 +1,22 @@
 # SparseBEV
 
-This is the official PyTorch implementation for paper [SparseBEV: High-Performance Sparse 3D Object Detection from Multi-Camera Videos](https://arxiv.org/abs/2308.09244). (ICCV 2023)
+[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/sparsebev-high-performance-sparse-3d-object/3d-object-detection-on-nuscenes-camera-only)](https://paperswithcode.com/sota/3d-object-detection-on-nuscenes-camera-only?p=sparsebev-high-performance-sparse-3d-object)
+
+This is the official PyTorch implementation for our ICCV 2023 paper:
+
+> [**SparseBEV: High-Performance Sparse 3D Object Detection from Multi-Camera Videos**](https://arxiv.org/abs/2308.09244)<br>
+> [Haisong Liu](https://scholar.google.com/citations?user=Z9yWFA0AAAAJ&hl=en&oi=sra), [Yao Teng](https://scholar.google.com/citations?user=eLIsViIAAAAJ&hl=en&oi=sra), [Tao Lu](https://scholar.google.com/citations?user=Ch28NiIAAAAJ&hl=en&oi=sra), [Haiguang Wang](https://miraclesinwang.github.io/), [Limin Wang](https://scholar.google.com/citations?user=HEuN8PcAAAAJ&hl=en&oi=sra)<br>Nanjing University, Shanghai AI Lab
 
 中文解读：[https://zhuanlan.zhihu.com/p/654821380](https://zhuanlan.zhihu.com/p/654821380)
+
+![](asserts/banner.jpg)
+
+## News
+
+* 2023-09-23: We release [the native PyTorch implementation of sparse sampling](https://github.com/MCG-NJU/SparseBEV/blob/97c8c798284555accedd0625395dd397fa4511d2/models/csrc/wrapper.py#L14). You can use this version if you encounter problems when compiling CUDA operators. It’s only about 15% slower.
+* 2023-08-21: We release the paper, code and pretrained weights.
+* 2023-07-14: SparseBEV is accepted to ICCV 2023.
+* 2023-02-09: SparseBEV-Beta achieves 65.6 NDS on [the nuScenes leaderboard](https://eval.ai/web/challenges/challenge-page/356/leaderboard/1012).
 
 ## Model Zoo
 
