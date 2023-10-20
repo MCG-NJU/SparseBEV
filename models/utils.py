@@ -1,3 +1,4 @@
+import tempfile
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -308,7 +309,7 @@ class GpuPhotoMetricDistortion:
 class DumpConfig:
     def __init__(self):
         self.enabled = False
-        self.out_dir = 'outputs'
+        self.out_dir = tempfile.mkdtemp()
         self.stage_count = 0
         self.frame_count = 0
 

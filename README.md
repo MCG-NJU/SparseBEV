@@ -13,6 +13,7 @@ This is the official PyTorch implementation for our ICCV 2023 paper:
 
 ## News
 
+* 2023-10-20: We provide code for visualizing the predictions and the sampling points, as requested in [#25](https://github.com/MCG-NJU/SparseBEV/issues/25).
 * 2023-09-23: We release [the native PyTorch implementation of sparse sampling](https://github.com/MCG-NJU/SparseBEV/blob/97c8c798284555accedd0625395dd397fa4511d2/models/csrc/wrapper.py#L14). You can use this version if you encounter problems when compiling CUDA operators. It’s only about 15% slower.
 * 2023-08-21: We release the paper, code and pretrained weights.
 * 2023-07-14: SparseBEV is accepted to ICCV 2023.
@@ -90,7 +91,9 @@ data/nuscenes
 ├── maps
 ├── nuscenes_infos_test_sweep.pkl
 ├── nuscenes_infos_train_sweep.pkl
+├── nuscenes_infos_train_mini_sweep.pkl
 ├── nuscenes_infos_val_sweep.pkl
+├── nuscenes_infos_val_mini_sweep.pkl
 ├── samples
 ├── sweeps
 ├── v1.0-test
@@ -147,6 +150,20 @@ FPS is measured with a single GPU:
 ```
 export CUDA_VISIBLE_DEVICES=0
 python timing.py --config configs/r50_nuimg_704x256.py --weights checkpoints/r50_nuimg_704x256.pth
+```
+
+## Visualization
+
+Visualize the predicted bbox:
+
+```
+python viz_bbox_predictions.py --config configs/r50_nuimg_704x256.py --weights checkpoints/r50_nuimg_704x256.pth
+```
+
+Visualize the sampling points (like Fig. 6 in the paper):
+
+```
+python viz_sample_points.py --config configs/r50_nuimg_704x256.py --weights checkpoints/r50_nuimg_704x256.pth
 ```
 
 ## Acknowledgements

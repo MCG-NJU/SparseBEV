@@ -186,9 +186,9 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
             query_bbox_dec = decode_bbox(query_bbox, self.pc_range)
             bbox_pred_dec = decode_bbox(bbox_pred, self.pc_range)
             cls_score_sig = torch.sigmoid(cls_score)
-            torch.save(query_bbox_dec, '{}/query_bbox_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
-            torch.save(bbox_pred_dec, '{}/bbox_pred_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
-            torch.save(cls_score_sig, '{}/cls_score_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
+            torch.save(query_bbox_dec.cpu(), '{}/query_bbox_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
+            torch.save(bbox_pred_dec.cpu(), '{}/bbox_pred_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
+            torch.save(cls_score_sig.cpu(), '{}/cls_score_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
 
         return query_feat, cls_score, bbox_pred
 
@@ -216,7 +216,7 @@ class SparseBEVSelfAttention(BaseModule):
         tau = self.gen_tau(query_feat)  # [B, Q, 8]
 
         if DUMP.enabled:
-            torch.save(tau, '{}/sasa_tau_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
+            torch.save(tau.cpu(), '{}/sasa_tau_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
 
         tau = tau.permute(0, 2, 1)  # [B, 8, Q]
         attn_mask = dist[:, None, :, :] * tau[..., None]  # [B, 8, Q, Q]

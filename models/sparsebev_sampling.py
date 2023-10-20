@@ -80,9 +80,9 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
 
     # for visualization only
     if DUMP.enabled:
-        torch.save(torch.cat([sample_points_cam, homo_nonzero], dim=-1),
+        torch.save(torch.cat([sample_points_cam, homo_nonzero], dim=-1).cpu(),
                    '{}/sample_points_cam_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
-        torch.save(valid_mask,
+        torch.save(valid_mask.cpu(),
                    '{}/sample_points_cam_valid_mask_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
 
     valid_mask = valid_mask.permute(0, 1, 3, 4, 2)  # [B, T, Q, GP, N]
