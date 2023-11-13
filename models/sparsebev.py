@@ -268,8 +268,9 @@ class SparseBEV(MVXTwoStageDetector):
         img_metas[0]['ori_shape'] = [img_shape for _ in range(len(img_filenames))]
         img_metas[0]['pad_shape'] = [img_shape for _ in range(len(img_filenames))]
 
-        img_feats_large, img_metas_large = [], []
+        img_feats_list, img_metas_list = [], []
 
+        # extract feature frame by frame
         for i in range(num_frames):
             img_indices = list(np.arange(i * 6, (i + 1) * 6))
 
@@ -279,41 +280,42 @@ class SparseBEV(MVXTwoStageDetector):
                     img_metas_curr[0][k] = [img_metas[0][k][i] for i in img_indices]
 
             if img_filenames[img_indices[0]] in self.memory:
+                # found in memory
                 img_feats_curr = self.memory[img_filenames[img_indices[0]]]
             else:
-                img_curr_large = img[:, i]  # [B, 6, C, H, W]
-                img_feats_curr = self.extract_feat(img_curr_large, img_metas_curr)
+                # extract feature and put into memory
+                img_feats_curr = self.extract_feat(img[:, i], img_metas_curr)
                 self.memory[img_filenames[img_indices[0]]] = img_feats_curr
                 self.queue.put(img_filenames[img_indices[0]])
+                while self.queue.qsize() >= 16:  # avoid OOM
+                    pop_key = self.queue.get()
+                    self.memory.pop(pop_key)
 
-            img_feats_large.append(img_feats_curr)
-            img_metas_large.append(img_metas_curr)
+            img_feats_list.append(img_feats_curr)
+            img_metas_list.append(img_metas_curr)
 
         # reorganize
-        feat_levels = len(img_feats_large[0])
-        img_feats_large_reorganized = []
+        feat_levels = len(img_feats_list[0])
+        img_feats_reorganized = []
         for j in range(feat_levels):
-            feat_l = torch.cat([img_feats_large[i][j] for i in range(len(img_feats_large))], dim=0)
+            feat_l = torch.cat([img_feats_list[i][j] for i in range(len(img_feats_list))], dim=0)
             feat_l = feat_l.flatten(0, 1)[None, ...]
-            img_feats_large_reorganized.append(feat_l)
+            img_feats_reorganized.append(feat_l)
 
-        img_metas_large_reorganized = img_metas_large[0]
-        for i in range(1, len(img_metas_large)):
-            for k, v in img_metas_large[i][0].items():
+        img_metas_reorganized = img_metas_list[0]
+        for i in range(1, len(img_metas_list)):
+            for k, v in img_metas_list[i][0].items():
                 if isinstance(v, list):
-                    img_metas_large_reorganized[0][k].extend(v)
+                    img_metas_reorganized[0][k].extend(v)
 
-        img_feats = img_feats_large_reorganized
-        img_metas = img_metas_large_reorganized
+        img_feats = img_feats_reorganized
+        img_metas = img_metas_reorganized
         img_feats = cast_tensor_type(img_feats, torch.half, torch.float32)
 
+        # run detector
         bbox_list = [dict() for _ in range(1)]
         bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale)
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
-
-        while self.queue.qsize() >= 16:
-            pop_key = self.queue.get()
-            self.memory.pop(pop_key)
 
         return bbox_list
