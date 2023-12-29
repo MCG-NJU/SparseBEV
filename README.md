@@ -13,6 +13,7 @@ This is the official PyTorch implementation for our ICCV 2023 paper:
 
 ## News
 
+* 2023-12-29: Check out our new paper ([https://arxiv.org/abs/2312.17118](https://arxiv.org/abs/2312.17118)) to learn about SparseOcc, a fully sparse architecture for panoptic occupancy! For questions about the new paper, you can open an issue in this repo. 
 * 2023-10-20: We provide code for visualizing the predictions and the sampling points, as requested in [#25](https://github.com/MCG-NJU/SparseBEV/issues/25).
 * 2023-09-23: We release [the native PyTorch implementation of sparse sampling](https://github.com/MCG-NJU/SparseBEV/blob/97c8c798284555accedd0625395dd397fa4511d2/models/csrc/wrapper.py#L14). You can use this version if you encounter problems when compiling CUDA operators. It’s only about 15% slower.
 * 2023-08-21: We release the paper, code and pretrained weights.
