@@ -14,7 +14,7 @@ from .utils import GridMask, pad_multiple, GpuPhotoMetricDistortion
 class SparseBEV(MVXTwoStageDetector):
     def __init__(self,
                  data_aug=None,
-                 stop_prev_grad=False,
+                 stop_prev_grad=0,
                  pts_voxel_layer=None,
                  pts_voxel_encoder=None,
                  pts_middle_encoder=None,
@@ -99,12 +99,12 @@ class SparseBEV(MVXTwoStageDetector):
         for img_meta in img_metas:
             img_meta.update(input_shape=input_shape)
 
-        if self.training and self.stop_prev_grad:
+        if self.training and self.stop_prev_grad > 0:
             H, W = input_shape
             img = img.reshape(B, -1, 6, C, H, W)
 
-            img_grad = img[:, :1]
-            img_nograd = img[:, 1:]
+            img_grad = img[:, :self.stop_prev_grad]
+            img_nograd = img[:, self.stop_prev_grad:]
 
             all_img_feats = [self.extract_img_feat(img_grad.reshape(-1, C, H, W))]
 
