@@ -54,7 +54,7 @@ model = dict(
         img_color_aug=True,  # Move some augmentations to GPU
         img_norm_cfg=img_norm_cfg,
         img_pad_cfg=dict(size_divisor=32)),
-    stop_prev_grad=False,
+    stop_prev_grad=0,
     img_backbone=img_backbone,
     img_neck=img_neck,
     pts_bbox_head=dict(

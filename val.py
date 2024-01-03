@@ -112,6 +112,7 @@ def main():
     logging.info('Creating model: %s' % cfgs.model.type)
     model = build_model(cfgs.model)
     model.cuda()
+    model.fp16_enabled = True
 
     if world_size > 1:
         model = MMDistributedDataParallel(model, [local_rank], broadcast_buffers=False)
