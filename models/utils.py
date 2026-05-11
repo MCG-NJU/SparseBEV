@@ -1,10 +1,132 @@
+import math
 import tempfile
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from numpy import random
+from mmdet3d.core.bbox.structures.utils import limit_period
 
+def create_encoder(input_dim, embed_dims):
+    return nn.Sequential(
+        nn.Linear(input_dim, embed_dims),
+        nn.ReLU(inplace=True),
+        nn.LayerNorm(embed_dims),
+        nn.Linear(embed_dims, embed_dims),
+        nn.ReLU(inplace=True),
+        nn.LayerNorm(embed_dims)
+    )
+
+def history_bbox_warp(bbox, T_temp2cur, time_diff, pc_range=None):
+
+    T_temp2cur = torch.unsqueeze(T_temp2cur,  dim=1)  # [B, 1, 4, 4]
+    
+    pc_range_min = pc_range[:3]
+    pc_range_max = pc_range[3:6]
+    pc_range_scale = pc_range_max - pc_range_min
+    
+    out_bbox = bbox.clone()
+    center = out_bbox[..., :3] * pc_range_scale + pc_range_min  # [B, K, 3]
+    
+    # there is no vel_dim for box in waymo
+    if bbox.shape[-1] > 8:
+        # warp center based on velocity
+        vel = bbox[..., -2:]  # [B, K, 2]
+        dist = vel * time_diff[..., None, None].to(dtype=vel.dtype)  # [B, 1, 1]
+        center = torch.cat([
+            center[..., 0:2] + dist,
+            center[..., 2:3]
+        ], dim=-1)
+
+    center = torch.cat([center, torch.ones_like(center[..., :1])], dim=-1)  # [B, K, 4]
+    
+    yaw = torch.cat([out_bbox[..., 6:8].flip(-1), torch.zeros_like(center[..., :2])], dim=-1)  # [B, K, 4]
+    vel_mat = torch.cat([out_bbox[..., -2:], torch.zeros_like(center[..., :2])], dim=-1)  # [B, K, 4]
+    box_mat = torch.stack([center, yaw, vel_mat], dim=-1)  # [B, K, 4, 3]
+
+    warpped_box = T_temp2cur @ box_mat  # [B, 1, 4, 4] @ [B, K, 4, 3] -> [B, K, 4, 3]
+    
+    transformed_center = warpped_box[..., :3, 0]  # [B, K, 3]
+    
+    out_bbox[..., :3] = (transformed_center - pc_range_min) / pc_range_scale
+    out_bbox[..., 6:8] = warpped_box[..., :2, 1].flip(-1)  # [B, K, 2]
+    if bbox.shape[-1] > 8:
+        out_bbox[..., -2:] = warpped_box[..., :2, 2]  # [B, K, 2]
+    
+    return out_bbox
+
+def batch_indexing(batched_data: torch.Tensor, batched_indices: torch.Tensor, layout='channel_first'):
+    def batch_indexing_channel_first(batched_data: torch.Tensor, batched_indices: torch.Tensor):
+        """
+        :param batched_data: [batch_size, C, N]
+        :param batched_indices: [batch_size, I1, I2, ..., Im]
+        :return: indexed data: [batch_size, C, I1, I2, ..., Im]
+        """
+        def product(arr):
+            p = 1
+            for i in arr:
+                p *= i
+            return p
+        assert batched_data.shape[0] == batched_indices.shape[0]
+        batch_size, n_channels = batched_data.shape[:2]
+        indices_shape = list(batched_indices.shape[1:])
+        batched_indices = batched_indices.reshape([batch_size, 1, -1])
+        batched_indices = batched_indices.expand([batch_size, n_channels, product(indices_shape)])
+        result = torch.gather(batched_data, dim=2, index=batched_indices.to(torch.int64))
+        result = result.view([batch_size, n_channels] + indices_shape)
+        return result
+
+    def batch_indexing_channel_last(batched_data: torch.Tensor, batched_indices: torch.Tensor):
+        """
+        :param batched_data: [batch_size, N, C]
+        :param batched_indices: [batch_size, I1, I2, ..., Im]
+        :return: indexed data: [batch_size, I1, I2, ..., Im, C]
+        """
+        assert batched_data.shape[0] == batched_indices.shape[0]
+        batch_size = batched_data.shape[0]
+        view_shape = [batch_size] + [1] * (len(batched_indices.shape) - 1)
+        expand_shape = [batch_size] + list(batched_indices.shape)[1:]
+        indices_of_batch = torch.arange(batch_size, dtype=torch.long, device=batched_data.device)
+        indices_of_batch = indices_of_batch.view(view_shape).expand(expand_shape)  # [bs, I1, I2, ..., Im]
+        if len(batched_data.shape) == 2:
+            return batched_data[indices_of_batch, batched_indices.to(torch.long)]
+        else:
+            return batched_data[indices_of_batch, batched_indices.to(torch.long), :]
+
+    if layout == 'channel_first':
+        return batch_indexing_channel_first(batched_data, batched_indices)
+    elif layout == 'channel_last':
+        return batch_indexing_channel_last(batched_data, batched_indices)
+    else:
+        raise ValueError
+
+# https://github.com/exiawsh/StreamPETR/blob/2315cf9f077817ec7089c87094ba8a63f76c2acf/projects/mmdet3d_plugin/models/utils/misc.py#L7
+def memory_refresh(memory, prev_exist):
+    memory_shape = memory.shape
+    view_shape = [1 for _ in range(len(memory_shape))]
+    prev_exist = prev_exist.view(-1, *view_shape[1:]) 
+    return memory * prev_exist
+
+
+def transform_reference_points(reference_points, egopose, reverse=False, translation=True):
+    reference_points = torch.cat([reference_points, torch.ones_like(reference_points[..., 0:1])], dim=-1)
+    if reverse:
+        matrix = egopose.inverse()
+    else:
+        matrix = egopose
+    if not translation:
+        matrix[..., :3, 3] = 0.0
+    reference_points = (matrix.unsqueeze(1) @ reference_points.unsqueeze(-1)).squeeze(-1)[..., :3]
+    return reference_points
+
+def transform_angle(angle, rot_mat):
+    rot_mat_T = rot_mat.T
+    angle_delta = torch.atan2(rot_mat_T[0, 1], rot_mat_T[0, 0]).unsqueeze(-1)  # [B, 1]
+    angle += angle_delta
+    angle = limit_period(angle, period=np.pi * 2)
+
+    return angle
+    
 
 class GridMask(nn.Module):
     def __init__(self, ratio=0.5, prob=0.7):
@@ -102,18 +224,29 @@ def inverse_sigmoid(x, eps=1e-5):
     return torch.log(x1 / x2)
 
 
-def pad_multiple(inputs, img_metas, size_divisor=32):
+def pad_multiple(inputs, img_metas, size_divisor=32, training=False):
     _, _, img_h, img_w = inputs.shape
 
     pad_h = 0 if img_h % size_divisor == 0 else size_divisor - (img_h % size_divisor)
     pad_w = 0 if img_w % size_divisor == 0 else size_divisor - (img_w % size_divisor)
 
-    B = len(img_metas)
-    N = len(img_metas[0]['ori_shape'])
+    if training:
+        T = len(img_metas)
+        B = len(img_metas[0])
+        N = len(img_metas[0][0]['ori_shape'])
 
-    for b in range(B):
-        img_metas[b]['img_shape'] = [(img_h + pad_h, img_w + pad_w, 3) for _ in range(N)]
-        img_metas[b]['pad_shape'] = [(img_h + pad_h, img_w + pad_w, 3) for _ in range(N)]
+        for t in range(T):
+            for b in range(B):
+                img_metas[t][b]['img_shape'] = [(img_h + pad_h, img_w + pad_w, 3) for _ in range(N)]
+                img_metas[t][b]['pad_shape'] = [(img_h + pad_h, img_w + pad_w, 3) for _ in range(N)]
+
+    else:
+        B = len(img_metas)
+        N = len(img_metas[0]['ori_shape'])
+
+        for b in range(B):
+            img_metas[b]['img_shape'] = [(img_h + pad_h, img_w + pad_w, 3) for _ in range(N)]
+            img_metas[b]['pad_shape'] = [(img_h + pad_h, img_w + pad_w, 3) for _ in range(N)]
 
     if pad_h == 0 and pad_w == 0:
         return inputs

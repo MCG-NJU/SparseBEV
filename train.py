@@ -9,12 +9,13 @@ import torch.distributed as dist
 from datetime import datetime
 from mmcv import Config, DictAction
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
-from mmcv.runner import EpochBasedRunner, build_optimizer, load_checkpoint
+from mmcv.runner import EpochBasedRunner, build_optimizer, load_checkpoint, IterBasedRunner
 from mmdet.apis import set_random_seed
 from mmdet.core import DistEvalHook, EvalHook
 from mmdet3d.datasets import build_dataset
 from mmdet3d.models import build_model
 from loaders.builder import build_dataloader
+from utils import CustomDistEvalHook
 
 
 def main():
@@ -23,6 +24,7 @@ def main():
     parser.add_argument('--override', nargs='+', action=DictAction)
     parser.add_argument('--local_rank', type=int, default=0)
     parser.add_argument('--world_size', type=int, default=1)
+    parser.add_argument('--run_name', type=str, required=True)
     args = parser.parse_args()
 
     # parse configs
@@ -61,7 +63,8 @@ def main():
         else:
             run_name = ''
             if not cfgs.debug:
-                run_name = input('Name your run (leave blank for default): ')
+                #run_name = input('Name your run (leave blank for default): ')
+                run_name = args.run_name
             if run_name == '':
                 run_name = datetime.now().strftime("%Y-%m-%d/%H-%M-%S")
 
@@ -104,6 +107,9 @@ def main():
         dist=world_size > 1,
         shuffle=True,
         seed=0,
+        shuffler_sampler=cfgs.data.shuffler_sampler,  
+        nonshuffler_sampler=cfgs.data.nonshuffler_sampler,  
+        runner_type=cfgs.runner,
     )
 
     logging.info('Loading validation set from %s' % cfgs.dataset_root)
@@ -114,7 +120,8 @@ def main():
         workers_per_gpu=cfgs.data.workers_per_gpu,
         num_gpus=world_size,
         dist=world_size > 1,
-        shuffle=False
+        shuffle=False,
+        nonshuffler_sampler=cfgs.data.nonshuffler_sampler
     )
 
     logging.info('Creating model: %s' % cfgs.model.type)
@@ -143,19 +150,37 @@ def main():
         max_epochs=cfgs.total_epochs,
         meta=dict(),
     )
-
+    # for seq config
+    if 'runner' in cfgs and cfgs.runner.type == "IterBasedRunner":
+        runner = IterBasedRunner(
+            model,
+            optimizer=optimizer,
+            work_dir=work_dir,
+            logger=logging.root,
+            max_iters=cfgs.num_epochs * cfgs.num_iters_per_epoch,
+            meta=dict(),
+        )
+   
     runner.register_lr_hook(cfgs.lr_config)
     runner.register_optimizer_hook(cfgs.optimizer_config)
     runner.register_checkpoint_hook(cfgs.checkpoint_config)
     runner.register_logger_hooks(cfgs.log_config)
     runner.register_timer_hook(dict(type='IterTimerHook'))
-    runner.register_custom_hooks(dict(type='DistSamplerSeedHook'))
+    # TODO
+    if isinstance(runner, EpochBasedRunner):
+        runner.register_custom_hooks(dict(type='DistSamplerSeedHook'))
+    else:
+        runner.register_custom_hooks(cfgs.get('custom_hooks', None))
 
     if cfgs.eval_config['interval'] > 0:
+        by_epoch = cfgs.runner['type'] != 'IterBasedRunner'
         if world_size > 1:
-            runner.register_hook(DistEvalHook(val_loader, interval=cfgs.eval_config['interval'], gpu_collect=True))
+            if cfgs.data.val.type == 'CustomWaymoDataset':
+                runner.register_hook(CustomDistEvalHook(val_loader, interval=cfgs.eval_config['interval'], by_epoch=by_epoch, gpu_collect=True, result_prefix='outputs/waymo_result/'+args.run_name))
+            else:
+                runner.register_hook(CustomDistEvalHook(val_loader, interval=cfgs.eval_config['interval'], by_epoch=by_epoch, gpu_collect=True))
         else:
-            runner.register_hook(EvalHook(val_loader, interval=cfgs.eval_config['interval']))
+            runner.register_hook(EvalHook(val_loader, interval=cfgs.eval_config['interval'], by_epoch=by_epoch))
 
     if cfgs.resume_from is not None:
         logging.info('Resuming from %s' % cfgs.resume_from)

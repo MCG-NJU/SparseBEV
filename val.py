@@ -1,3 +1,4 @@
+import json
 import os
 import utils
 import logging
@@ -10,10 +11,12 @@ import torch.backends.cudnn as cudnn
 from mmcv import Config
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import load_checkpoint
-from mmdet.apis import set_random_seed, multi_gpu_test, single_gpu_test
-from mmdet3d.datasets import build_dataset, build_dataloader
+from mmdet.apis import set_random_seed, single_gpu_test
+from mmdet3d.datasets import build_dataset
 from mmdet3d.models import build_model
 from models.utils import VERSION
+from loaders.builder import build_dataloader
+from utils import custom_multi_gpu_test
 
 
 def evaluate(dataset, results, epoch):
@@ -45,6 +48,15 @@ def evaluate(dataset, results, epoch):
         'mAAE': mAAE,
         'NDS': NDS,
     }
+
+def evaluate_waymo(dataset, results, epoch):
+    # metrics = dataset.evaluate(results, metric='waymo', show=True, out_dir='/data/xiehanxiao/waymo/visual_result')
+    # metrics = dataset.evaluate(results, metric='waymo', pklfile_prefix='/home/xiehanxiao/camlidet/tmp')
+    metrics = dataset.evaluate(results, metric='waymo', pklfile_prefix='outputs/tmp', result_prefix='outputs/waymo_result/waymo_single_frame_900q')
+    print(metrics)
+    print(json.dumps(metrics, indent=4))
+    
+    return metrics
 
 
 def main():
@@ -129,12 +141,19 @@ def main():
         VERSION.name = checkpoint['version']
 
     if world_size > 1:
-        results = multi_gpu_test(model, val_loader, gpu_collect=True)
+        results = custom_multi_gpu_test(model, val_loader, gpu_collect=True)
     else:
         results = single_gpu_test(model, val_loader)
 
+    #torch.save(results, 'outputs/waymo_result/waymo_singleframe_900q.pt')
+    #results = torch.load('outputs/waymo_result/waymo_singleframe_900q.pt')
+
     if local_rank == 0:
-        evaluate(val_dataset, results, -1)
+        if cfgs.data.val.type == 'CustomWaymoDataset':
+            metrics = evaluate_waymo(val_dataset, results, -1)
+
+        else:
+            evaluate(val_dataset, results, -1)
 
 
 if __name__ == '__main__':

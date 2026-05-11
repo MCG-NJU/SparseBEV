@@ -7,9 +7,13 @@ from mmdet.models import HEADS
 from mmdet.models.dense_heads import DETRHead
 from mmdet3d.core.bbox.coders import build_bbox_coder
 from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes
-from .bbox.utils import normalize_bbox, encode_bbox
-from .utils import VERSION
-
+from .utils import history_bbox_warp
+from .bbox.utils import decode_bbox, normalize_bbox, encode_bbox
+from .utils import VERSION, batch_indexing
+from .csrc.wrapper import MSMV_CUDA
+from mmdet.models.utils import build_transformer
+from mmcv.utils import build_from_cfg
+from mmcv.cnn.bricks.registry import PLUGIN_LAYERS, POSITIONAL_ENCODING
 
 @HEADS.register_module()
 class SparseBEVHead(DETRHead):
@@ -20,10 +24,12 @@ class SparseBEVHead(DETRHead):
                  query_denoising=True,
                  query_denoising_groups=10,
                  bbox_coder=None,
+                 num_views=6,
                  code_size=10,
                  code_weights=[1.0] * 10,
                  train_cfg=dict(),
                  test_cfg=dict(max_per_img=100),
+                 memory_config=dict(),
                  **kwargs):
         self.code_size = code_size
         self.code_weights = code_weights
@@ -33,12 +39,15 @@ class SparseBEVHead(DETRHead):
         self.test_cfg = test_cfg
         self.fp16_enabled = False
         self.embed_dims = in_channels
+        self.num_views = num_views
 
         super(SparseBEVHead, self).__init__(num_classes, in_channels, train_cfg=train_cfg, test_cfg=test_cfg, **kwargs)
 
         self.code_weights = nn.Parameter(torch.tensor(self.code_weights), requires_grad=False)
         self.bbox_coder = build_bbox_coder(bbox_coder)
-        self.pc_range = self.bbox_coder.pc_range
+        
+        self.pc_range = nn.Parameter(torch.tensor(
+            self.bbox_coder.pc_range), requires_grad=False)
 
         self.dn_enabled = query_denoising
         self.dn_group_num = query_denoising_groups
@@ -46,12 +55,30 @@ class SparseBEVHead(DETRHead):
         self.dn_bbox_noise_scale = 0.5
         self.dn_label_noise_scale = 0.5
 
+        # init memory
+        self.num_history = memory_config['num_history']
+        self.max_time_interval = memory_config['max_time_interval']
+        self.memory_len = memory_config['memory_len']
+        self.len_per_frame = memory_config['len_per_frame']
+        self.interval = memory_config['interval']
+        
+        self.propagate_feat = None
+        self.propagate_bbox = None
+        self.metas = None
+        self.mask = None
+        self.cls_scores = None
+        self.memory_feat = None
+        self.memory_bbox = None
+
+        self.padding_bbox = nn.Embedding(self.num_history, self.code_size)  # (x, y, z, w, l, h, sin, cos, vx, vy)
+
     def _init_layers(self):
-        self.init_query_bbox = nn.Embedding(self.num_query, 10)  # (x, y, z, w, l, h, sin, cos, vx, vy)
+        self.init_query_bbox = nn.Embedding(self.num_query, self.code_size)  # (x, y, z, w, l, h, sin, cos, vx, vy)
         self.label_enc = nn.Embedding(self.num_classes + 1, self.embed_dims - 1)  # DAB-DETR
 
         nn.init.zeros_(self.init_query_bbox.weight[:, 2:3])
-        nn.init.zeros_(self.init_query_bbox.weight[:, 8:10])
+        if self.code_size > 8:
+            nn.init.zeros_(self.init_query_bbox.weight[:, 8:10])
         nn.init.constant_(self.init_query_bbox.weight[:, 5:6], 1.5)
 
         grid_size = int(math.sqrt(self.num_query))
@@ -65,22 +92,78 @@ class SparseBEVHead(DETRHead):
 
     def init_weights(self):
         self.transformer.init_weights()
+        
+        nn.init.zeros_(self.padding_bbox.weight[:, 2:3])
+        if self.code_size > 8:
+            nn.init.zeros_(self.padding_bbox.weight[:, 8:10])
+        nn.init.constant_(self.padding_bbox.weight[:, 5:6], 1.5)
+        nn.init.uniform_(self.padding_bbox.weight[:, :2], 0, 1)
 
-    def forward(self, mlvl_feats, img_metas):
-        query_bbox = self.init_query_bbox.weight.clone()  # [Q, 10]
+        self.padding_bbox.weight.requires_grad = False
+
+    def reset_memory(self):
+        self.propagate_feat = None
+        self.propagate_bbox = None
+        self.cls_scores = None
+        self.metas = None
+        self.mask = None
+
+        self.memory_feat = None
+        self.memory_bbox = None
+
+    def forward(self, img_metas, **data):
+        mlvl_feats = data['img_feats']
+        B = mlvl_feats[0].shape[0]
+
+        # warp history query_bbox to current frame
+        feature_queue, bbox_queue = self.temporal_warp(**data)
+        
+        query_bbox = self.init_query_bbox.weight.clone()  # [Q, 10]  encoded bbox
         #query_bbox[..., :3] = query_bbox[..., :3].sigmoid()
 
-        # query denoising
-        B = mlvl_feats[0].shape[0]
+        # query denoising      
         query_bbox, query_feat, attn_mask, mask_dict = self.prepare_for_dn_input(B, query_bbox, self.label_enc, img_metas)
 
-        cls_scores, bbox_preds = self.transformer(
+        # reuse query from last frame
+        query_feat, query_bbox = self.propagate(query_feat, query_bbox)
+
+        # calculate time difference according to timestamps
+        timestamps = data['img_timestamp'].reshape(query_bbox.shape[0], -1, self.num_views)
+        time_diff = timestamps[:, :1, :] - timestamps
+        time_diff = torch.mean(time_diff, dim=-1)
+        img_metas[0]['time_diff'] = time_diff.to(torch.float32)
+
+        # organize projections matrix and copy to CUDA
+        lidar2img = data['lidar2img']
+        img_metas[0]['lidar2img'] = lidar2img
+
+        # group image features in advance for sampling, see `sampling_4d` for more details
+        for lvl, feat in enumerate(mlvl_feats):
+            B, TN, GC, H, W = feat.shape  # [B, TN, GC, H, W]
+            N, T, G, C = self.num_views, TN // self.num_views, 4, GC // 4
+            feat = feat.reshape(B, T, N, G, C, H, W)
+
+            if MSMV_CUDA:  # Our CUDA operator requires channel_last
+                feat = feat.permute(0, 1, 3, 2, 5, 6, 4)  # [B, T, G, N, H, W, C]
+                feat = feat.reshape(B*T*G, N, H, W, C)
+            else:  # Torch's grid_sample requires channel_first
+                feat = feat.permute(0, 1, 3, 4, 2, 5, 6)  # [B, T, G, C, N, H, W]
+                feat = feat.reshape(B*T*G, C, N, H, W)
+
+            mlvl_feats[lvl] = feat.contiguous()
+        
+        cls_scores, bbox_preds, outs_dec = self.transformer(
             query_bbox,
             query_feat,
             mlvl_feats,
-            attn_mask=attn_mask,
+            feature_queue,
+            bbox_queue,
+            attn_mask=attn_mask,  
             img_metas=img_metas,
         )
+
+        # update the memory bank
+        self.update_memory(outs_dec[-1], bbox_preds[-1], cls_scores[-1], mask_dict=mask_dict, **data)
 
         bbox_preds[..., 0] = bbox_preds[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
         bbox_preds[..., 1] = bbox_preds[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
@@ -90,7 +173,7 @@ class SparseBEVHead(DETRHead):
             bbox_preds[..., 0:2],
             bbox_preds[..., 3:5],
             bbox_preds[..., 2:3],
-            bbox_preds[..., 5:10],
+            bbox_preds[..., 5:self.code_size],
         ], dim=-1)  # [cx, cy, w, l, cz, h, sin, cos, vx, vy]
 
         if mask_dict is not None and mask_dict['pad_size'] > 0:  # if using query denoising
@@ -115,7 +198,88 @@ class SparseBEVHead(DETRHead):
             }
 
         return outs
+    
+    def temporal_warp(self, **data):
 
+        if self.propagate_bbox is not None:
+            
+            time_interval = (data["timestamp"] - self.metas["timestamp"]).to(self.propagate_bbox.device)
+            pc_range = self.pc_range.to(self.propagate_bbox.device)
+            T_temp2cur = data["ego_pose_inv"]  @ self.metas["ego_pose"]  # global2lidar @ lidar2global
+            
+            self.propagate_bbox = history_bbox_warp(self.propagate_bbox, T_temp2cur, time_interval, pc_range)
+            self.memory_bbox = history_bbox_warp(self.memory_bbox, T_temp2cur, time_interval, pc_range)
+            
+            # self.mask = data['prev_exists'].bool()
+            valid_mask = (torch.abs(time_interval) <= self.max_time_interval)
+            self.mask = valid_mask
+
+        if self.interval == 1 :
+            return self.memory_feat, self.memory_bbox
+        
+        else:
+            if self.memory_feat is not None and self.memory_feat.shape[1] > self.len_per_frame:
+                num_frames = self.memory_feat.shape[1] // self.len_per_frame
+
+                return torch.cat([self.memory_feat[:, i * self.len_per_frame: i * self.len_per_frame + self.len_per_frame] for i in range(1, num_frames, 2)], dim=1), \
+                    torch.cat([self.memory_bbox[:, i * self.len_per_frame: i * self.len_per_frame + self.len_per_frame] for i in range(1, num_frames, 2)], dim=1)
+                
+            else:
+                return None, None
+
+    def propagate(self, query_feat, query_bbox):
+        padding_feature = query_feat[:, -2:-1, :].repeat(1, self.num_history, 1)  # [B, K, C]
+        padding_bbox = self.padding_bbox.weight.clone()  # [K, 10]
+        padding_bbox = padding_bbox[None].repeat(query_bbox.shape[0], 1, 1)  # [B, K, 10]
+        
+        if self.propagate_feat is not None:
+            # not update if history and curr is not adj frame
+            padding_bbox = torch.where(self.mask[:, None, None], self.propagate_bbox, padding_bbox)
+            padding_feature = torch.where(self.mask[:, None, None], self.propagate_feat, padding_feature)
+            # padding_bbox[self.mask] = self.propagate_bbox[self.mask]
+            # padding_feature[self.mask] = self.propagate_feat[self.mask]
+
+        query_feat = torch.cat([query_feat, padding_feature], dim=1)
+        query_bbox = torch.cat([query_bbox, padding_bbox], dim=1)
+        
+        return query_feat, query_bbox
+    
+    def update_memory(self, outs_dec, bbox_preds, cls_scores, mask_dict=None, **metas):
+
+        if self.num_history > 0:  # 500
+            # NOTE add use dn
+            if self.training and mask_dict and mask_dict['pad_size'] > 0:
+                outs_dec = outs_dec[:, mask_dict['pad_size']:, :]
+                bbox_preds = bbox_preds[:, mask_dict['pad_size']:, :]
+                cls_scores = cls_scores[:, mask_dict['pad_size']:, :]
+            
+            outs_dec = outs_dec.detach()
+            bbox_preds = bbox_preds.detach()
+            cls_scores = cls_scores.detach()  # [B, Q, 10]
+
+            self.metas = metas
+
+            cls_scores, _ = cls_scores.max(-1)  # [B, Q]
+            cls_scores, indices = torch.topk(cls_scores, k=self.num_history, dim=1)  # [B, K]
+            
+            self.cls_scores = torch.sigmoid(cls_scores)
+            self.propagate_feat = batch_indexing(outs_dec, indices, layout='channel_last')  # [B, K, C]
+            self.propagate_bbox = batch_indexing(bbox_preds, indices, layout='channel_last')  # [B, K, 10]
+            
+            # TODO memory queue is for cross attn
+            # not merge cached query and memory queue 
+            # since self.len_per_frame is 256 and self.num_history is 500 for now
+            memory_bbox = self.propagate_bbox[:, :self.len_per_frame]
+            memory_feat = self.propagate_feat[:, :self.len_per_frame]
+            
+            # update memory queue
+            if self.memory_feat is None:
+                self.memory_feat = memory_feat
+                self.memory_bbox = memory_bbox
+            else:
+                self.memory_feat = torch.cat([memory_feat, self.memory_feat], dim=1)[:, :self.memory_len]
+                self.memory_bbox = torch.cat([memory_bbox, self.memory_bbox], dim=1)[:, :self.memory_len]
+                
     def prepare_for_dn_input(self, batch_size, init_query_bbox, label_enc, img_metas):
         # mostly borrowed from:
         #  - https://github.com/IDEA-Research/DN-DETR/blob/main/models/DN_DAB_DETR/dn_components.py
@@ -126,7 +290,7 @@ class SparseBEVHead(DETRHead):
         init_query_feat = label_enc.weight[self.num_classes].repeat(self.num_query, 1)
         init_query_feat = torch.cat([init_query_feat, indicator0], dim=1)
 
-        if self.training and self.dn_enabled:
+        if self.training and self.dn_enabled:  # TODO waymo
             targets = [{
                 'bboxes': torch.cat([m['gt_bboxes_3d'].gravity_center,
                                      m['gt_bboxes_3d'].tensor[:, 3:]], dim=1).cuda(),
@@ -205,6 +369,15 @@ class SparseBEVHead(DETRHead):
                 else:
                     attn_mask[dn_single_pad * i:dn_single_pad * (i + 1), dn_single_pad * (i + 1):dn_pad_size] = True
                     attn_mask[dn_single_pad * i:dn_single_pad * (i + 1), :dn_single_pad * i] = True
+           
+            # update dn mask for temporal modeling  
+            query_size = dn_pad_size + self.num_query + self.num_history  # dn_size + 400 + 500
+            # tgt_size = dn_pad_size + self.num_query + self.num_history + self.memory_len
+            # temporal_attn_mask = torch.ones(query_size, tgt_size).to(device) < 0
+            temporal_attn_mask = torch.ones(query_size, query_size).to(device) < 0
+            temporal_attn_mask[:attn_mask.size(0), :attn_mask.size(1)] = attn_mask 
+            temporal_attn_mask[dn_pad_size:, :dn_pad_size] = True
+            attn_mask = temporal_attn_mask
 
             mask_dict = {
                 'known_indice': torch.as_tensor(known_indice).long(),
@@ -263,9 +436,9 @@ class SparseBEVHead(DETRHead):
         isnotnan = torch.isfinite(normalized_bbox_targets).all(dim=-1)
         bbox_weights = bbox_weights * self.code_weights
         loss_bbox = self.loss_bbox(
-            bbox_preds[isnotnan, :10],
-            normalized_bbox_targets[isnotnan, :10],
-            bbox_weights[isnotnan, :10],
+            bbox_preds[isnotnan, :self.code_size],
+            normalized_bbox_targets[isnotnan, :self.code_size],
+            bbox_weights[isnotnan, :self.code_size],
             avg_factor=num_total_pos
         )
 
@@ -318,7 +491,7 @@ class SparseBEVHead(DETRHead):
         label_weights = gt_bboxes.new_ones(num_bboxes)
 
         # bbox targets
-        bbox_targets = torch.zeros_like(bbox_pred)[..., :9]
+        bbox_targets = torch.zeros_like(bbox_pred)[..., :self.code_size - 1]
         bbox_weights = torch.zeros_like(bbox_pred)
         bbox_weights[pos_inds] = 1.0
         
@@ -390,9 +563,9 @@ class SparseBEVHead(DETRHead):
         bbox_weights = bbox_weights * self.code_weights
 
         loss_bbox = self.loss_bbox(
-            bbox_preds[isnotnan, :10],
-            normalized_bbox_targets[isnotnan, :10],
-            bbox_weights[isnotnan, :10],
+            bbox_preds[isnotnan, :self.code_size],
+            normalized_bbox_targets[isnotnan, :self.code_size],
+            bbox_weights[isnotnan, :self.code_size],
             avg_factor=num_total_pos
         )
 
@@ -475,7 +648,7 @@ class SparseBEVHead(DETRHead):
                 bboxes[:, 3], bboxes[:, 4] = l, w
                 bboxes[:, 6] = -bboxes[:, 6] - math.pi / 2
 
-            bboxes = LiDARInstance3DBoxes(bboxes, 9)
+            bboxes = LiDARInstance3DBoxes(bboxes, self.code_size - 1)
             scores = preds['scores']
             labels = preds['labels']
             ret_list.append([bboxes, scores, labels])

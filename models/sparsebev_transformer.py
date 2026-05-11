@@ -7,126 +7,105 @@ from mmcv.cnn import bias_init_with_prob
 from mmcv.cnn.bricks.transformer import MultiheadAttention, FFN
 from mmdet.models.utils.builder import TRANSFORMER
 from .bbox.utils import decode_bbox
-from .utils import inverse_sigmoid, DUMP
+from .utils import create_encoder, inverse_sigmoid, DUMP
 from .sparsebev_sampling import sampling_4d, make_sample_points
 from .checkpoint import checkpoint as cp
-from .csrc.wrapper import MSMV_CUDA
 
 
 @TRANSFORMER.register_module()
 class SparseBEVTransformer(BaseModule):
-    def __init__(self, embed_dims, num_frames=8, num_points=4, num_layers=6, num_levels=4, num_classes=10, code_size=10, pc_range=[], init_cfg=None):
+    def __init__(self, embed_dims, num_frames=8, num_points=4, num_layers=6, num_levels=4, num_classes=10, num_views=6, code_size=10, pc_range=[], return_intermediate=True, init_cfg=None):
         assert init_cfg is None, 'To prevent abnormal initialization ' \
                             'behavior, init_cfg is not allowed to be set'
         super(SparseBEVTransformer, self).__init__(init_cfg=init_cfg)
 
         self.embed_dims = embed_dims
         self.pc_range = pc_range
+        self.num_views = num_views
+        self.return_intermediate = return_intermediate
 
-        self.decoder = SparseBEVTransformerDecoder(embed_dims, num_frames, num_points, num_layers, num_levels, num_classes, code_size, pc_range=pc_range)
+        self.decoder = SparseBEVTransformerDecoder(embed_dims, num_frames, num_points, num_layers, num_levels, num_classes, num_views, code_size, pc_range=pc_range, return_intermediate=return_intermediate)
 
     @torch.no_grad()
     def init_weights(self):
         self.decoder.init_weights()
 
-    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
-        cls_scores, bbox_preds = self.decoder(query_bbox, query_feat, mlvl_feats, attn_mask, img_metas)
+    def forward(self, query_bbox, query_feat, mlvl_feats, temp_query_feat, temp_query_bbox, attn_mask, img_metas, **data):
+        cls_scores, bbox_preds, outs_dec = self.decoder(query_bbox, query_feat, mlvl_feats, temp_query_feat, temp_query_bbox, attn_mask, img_metas, **data)
 
         cls_scores = torch.nan_to_num(cls_scores)
         bbox_preds = torch.nan_to_num(bbox_preds)
+        outs_dec = torch.nan_to_num(outs_dec)
 
-        return cls_scores, bbox_preds
+        return cls_scores, bbox_preds, outs_dec
 
 
 class SparseBEVTransformerDecoder(BaseModule):
-    def __init__(self, embed_dims, num_frames=8, num_points=4, num_layers=6, num_levels=4, num_classes=10, code_size=10, pc_range=[], init_cfg=None):
+    def __init__(self, embed_dims, num_frames=8, num_points=4, num_layers=6, num_levels=4, num_classes=10, num_views=6, code_size=10, pc_range=[], return_intermediate=True, init_cfg=None):
         super(SparseBEVTransformerDecoder, self).__init__(init_cfg)
         self.num_layers = num_layers
         self.pc_range = pc_range
-
+        self.num_views = num_views
+        self.return_intermediate = return_intermediate
         # params are shared across all decoder layers
         self.decoder_layer = SparseBEVTransformerDecoderLayer(
-            embed_dims, num_frames, num_points, num_levels, num_classes, code_size, pc_range=pc_range
+            embed_dims, num_frames, num_points, num_levels, num_classes, num_views, code_size, pc_range=pc_range
         )
 
     @torch.no_grad()
     def init_weights(self):
         self.decoder_layer.init_weights()
 
-    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
-        cls_scores, bbox_preds = [], []
-
-        # calculate time difference according to timestamps
-        timestamps = np.array([m['img_timestamp'] for m in img_metas], dtype=np.float64)
-        timestamps = np.reshape(timestamps, [query_bbox.shape[0], -1, 6])
-        time_diff = timestamps[:, :1, :] - timestamps
-        time_diff = np.mean(time_diff, axis=-1).astype(np.float32)  # [B, F]
-        time_diff = torch.from_numpy(time_diff).to(query_bbox.device)  # [B, F]
-        img_metas[0]['time_diff'] = time_diff
-
-        # organize projections matrix and copy to CUDA
-        lidar2img = np.asarray([m['lidar2img'] for m in img_metas]).astype(np.float32)
-        lidar2img = torch.from_numpy(lidar2img).to(query_bbox.device)  # [B, N, 4, 4]
-        img_metas[0]['lidar2img'] = lidar2img
-
-        # group image features in advance for sampling, see `sampling_4d` for more details
-        for lvl, feat in enumerate(mlvl_feats):
-            B, TN, GC, H, W = feat.shape  # [B, TN, GC, H, W]
-            N, T, G, C = 6, TN // 6, 4, GC // 4
-            feat = feat.reshape(B, T, N, G, C, H, W)
-
-            if MSMV_CUDA:  # Our CUDA operator requires channel_last
-                feat = feat.permute(0, 1, 3, 2, 5, 6, 4)  # [B, T, G, N, H, W, C]
-                feat = feat.reshape(B*T*G, N, H, W, C)
-            else:  # Torch's grid_sample requires channel_first
-                feat = feat.permute(0, 1, 3, 4, 2, 5, 6)  # [B, T, G, C, N, H, W]
-                feat = feat.reshape(B*T*G, C, N, H, W)
-
-            mlvl_feats[lvl] = feat.contiguous()
-
+    def forward(self, query_bbox, query_feat, mlvl_feats, temp_query_feat, temp_query_bbox, attn_mask, img_metas):
+        
+        cls_scores, bbox_preds, outs_dec = [], [], []
+        temp_pos = None
+        self.num_layers = 4 if not self.training else 6
         for i in range(self.num_layers):
             DUMP.stage_count = i
 
-            query_feat, cls_score, bbox_pred = self.decoder_layer(
-                query_bbox, query_feat, mlvl_feats, attn_mask, img_metas
+            query_feat, cls_score, bbox_pred, temp_pos = self.decoder_layer(
+                query_bbox, query_feat, mlvl_feats, temp_query_feat, temp_query_bbox, temp_pos, attn_mask, img_metas
             )
             query_bbox = bbox_pred.clone().detach()
 
             cls_scores.append(cls_score)
             bbox_preds.append(bbox_pred)
+            outs_dec.append(query_feat)
 
         cls_scores = torch.stack(cls_scores)
         bbox_preds = torch.stack(bbox_preds)
+        outs_dec = torch.stack(outs_dec)
 
-        return cls_scores, bbox_preds
+        return cls_scores, bbox_preds, outs_dec
 
 
 class SparseBEVTransformerDecoderLayer(BaseModule):
-    def __init__(self, embed_dims, num_frames=8, num_points=4, num_levels=4, num_classes=10, code_size=10, num_cls_fcs=2, num_reg_fcs=2, pc_range=[], init_cfg=None):
+    def __init__(self, embed_dims, num_frames=8, num_points=4, num_levels=4, num_classes=10, num_views=6, code_size=10, num_cls_fcs=2, num_reg_fcs=2, pc_range=[], init_cfg=None):
         super(SparseBEVTransformerDecoderLayer, self).__init__(init_cfg)
 
         self.embed_dims = embed_dims
         self.num_classes = num_classes
+        self.num_views = num_views
         self.code_size = code_size
         self.pc_range = pc_range
 
-        self.position_encoder = nn.Sequential(
-            nn.Linear(3, self.embed_dims), 
-            nn.LayerNorm(self.embed_dims),
-            nn.ReLU(inplace=True),
-            nn.Linear(self.embed_dims, self.embed_dims),
-            nn.LayerNorm(self.embed_dims),
-            nn.ReLU(inplace=True),
-        )
-
+        self.position_encoder = QueryBoxEncoder(embed_dims, code_size=self.code_size)
+        
         self.self_attn = SparseBEVSelfAttention(embed_dims, num_heads=8, dropout=0.1, pc_range=pc_range)
-        self.sampling = SparseBEVSampling(embed_dims, num_frames=num_frames, num_groups=4, num_points=num_points, num_levels=num_levels, pc_range=pc_range)
-        self.mixing = AdaptiveMixing(in_dim=embed_dims, in_points=num_points * num_frames, n_groups=4, out_points=128)
+        #self.self_attn = SelfAdaptiveAttention(embed_dims, num_heads=8, dropout=0.1, pc_range=pc_range, num_per_frame=256)
+
+        self.cross_attn = TimeAdaptiveAttention(embed_dims, num_heads=8, dropout=0.1, frames=4, num_per_frame=256)
+        #self.cross_attn = MultiheadAttention(embed_dims, num_heads=8, dropout=0.1, batch_first=True)
+
+        self.sampling = SparseBEVSampling(embed_dims, num_frames=num_frames, num_groups=4, num_points=num_points, num_levels=num_levels, num_views=num_views, pc_range=pc_range)
+        self.mixing = AdaptiveMixing(in_dim=embed_dims, in_points=num_points, n_groups=4, out_points=128)
         self.ffn = FFN(embed_dims, feedforward_channels=512, ffn_drop=0.1)
 
         self.norm1 = nn.LayerNorm(embed_dims)
         self.norm2 = nn.LayerNorm(embed_dims)
         self.norm3 = nn.LayerNorm(embed_dims)
+        self.norm_temp = nn.LayerNorm(embed_dims)
 
         cls_branch = []
         for _ in range(num_cls_fcs):
@@ -146,6 +125,7 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
     @torch.no_grad()
     def init_weights(self):
         self.self_attn.init_weights()
+        self.cross_attn.init_weights()
         self.sampling.init_weights()
         self.mixing.init_weights()
 
@@ -159,14 +139,28 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
 
         return torch.cat([xyz_new, bbox_delta[..., 3:]], dim=-1)
 
-    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
+    def forward(self, query_bbox, query_feat, mlvl_feats, temp_query_feat, temp_query_bbox, temp_pos, attn_mask, img_metas):
         """
         query_bbox: [B, Q, 10] [cx, cy, cz, w, h, d, rot.sin, rot.cos, vx, vy]
         """
-        query_pos = self.position_encoder(query_bbox[..., :3])
-        query_feat = query_feat + query_pos
+        query_pos = self.position_encoder(query_bbox)
 
+        # temporal attn
+        if self.training:
+            if temp_query_bbox is not None:
+                temp_pos = self.position_encoder(temp_query_bbox)
+            else:
+                temp_pos = None
+        else:
+            if DUMP.stage_count == 0 and temp_query_bbox is not None:
+                temp_pos = self.position_encoder(temp_query_bbox)
+
+        query_feat = self.norm_temp(self.cross_attn(query_feat, temp_query_feat,
+                                                    query_pos=query_pos, key_pos=temp_pos))
+        
+        query_feat = query_feat + query_pos
         query_feat = self.norm1(self.self_attn(query_bbox, query_feat, attn_mask))
+
         sampled_feat = self.sampling(query_bbox, query_feat, mlvl_feats, img_metas)
         query_feat = self.norm2(self.mixing(sampled_feat, query_feat))
         query_feat = self.norm3(self.ffn(query_feat))
@@ -190,8 +184,32 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
             torch.save(bbox_pred_dec.cpu(), '{}/bbox_pred_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
             torch.save(cls_score_sig.cpu(), '{}/cls_score_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
 
-        return query_feat, cls_score, bbox_pred
+        return query_feat, cls_score, bbox_pred, temp_pos
 
+class QueryBoxEncoder(BaseModule):
+    def __init__(self, embed_dims=256, code_size=10):
+        super().__init__()
+        self.embed_dims = embed_dims
+        self.code_size = code_size
+        self.xyz_encoder = create_encoder(3, embed_dims)
+        self.whl_encoder = create_encoder(3, embed_dims)
+        self.yaw_encoder = create_encoder(2, embed_dims)
+        if code_size > 8:
+            self.vel_encoder = create_encoder(2, embed_dims)
+
+        self.output_fc = create_encoder(embed_dims, embed_dims)
+
+    def forward(self, query_bbox):
+        xyz_feat = self.xyz_encoder(query_bbox[..., :3])
+        whl_feat = self.whl_encoder(query_bbox[..., 3:6])
+        yaw_feat = self.yaw_encoder(query_bbox[..., 6:8])
+        output = xyz_feat + whl_feat + yaw_feat
+        if self.code_size > 8:
+            vel_feat = self.vel_encoder(query_bbox[..., 8:10])
+            output = output + vel_feat
+        
+        output = self.output_fc(output)
+        return output
 
 class SparseBEVSelfAttention(BaseModule):
     """Scale-adaptive Self Attention"""
@@ -247,16 +265,87 @@ class SparseBEVSelfAttention(BaseModule):
 
         return dist
 
+class TimeAdaptiveAttention(BaseModule):
+    """Scale-adaptive Self Attention"""
+    def __init__(self, embed_dims=256, num_heads=8, dropout=0.1, frames=4, num_per_frame=256, init_cfg=None):
+        super().__init__(init_cfg)
+
+        self.attention = MultiheadAttention(embed_dims, num_heads, dropout, batch_first=True)
+        self.gen_tau = nn.Linear(embed_dims, num_heads)
+
+        self.num_per_frame = num_per_frame
+
+        cross_dist = self.pre_calc_time_interval(frames)
+        self.register_buffer('cross_dist', cross_dist)
+        self.register_buffer('query_dist', torch.ones(1, dtype=torch.float32))
+
+    @torch.no_grad()
+    def init_weights(self):
+        nn.init.zeros_(self.gen_tau.weight)
+        nn.init.uniform_(self.gen_tau.bias, 0.0, 2.0)
+
+    def pre_calc_time_interval(self, frames):
+        """
+        query_time_stamp: 0  
+        key_time_stamp: [1, 2, ..., T]
+        """
+        key_time_stamp = torch.arange(frames, dtype=torch.float32) + 1  #[T]
+        dist = key_time_stamp[None, None, :].repeat_interleave(self.num_per_frame, dim=-1)  # [1, 1, K]
+
+        dist = -dist  # [1, 1, K]
+
+        return dist
+    
+    def inner_forward(self, query_feat, temp_feat, query_pos, key_pos):
+        """
+        query_bbox: [B, Q, 10]
+        query_feat: [B, Q, C]
+        """
+        if temp_feat is not None:
+            B, Q = query_feat.shape[:2]
+            dist = self.cross_dist[..., :temp_feat.shape[1]].expand(B, Q, -1)  # [1, 1, K]
+        else:
+            B, Q = query_feat.shape[:2]
+            dist = self.query_dist.expand(B, Q, Q)  # [B, Q, Q]
+
+        tau = self.gen_tau(query_feat)  # [B, Q, 8]
+
+        tau = tau.permute(0, 2, 1)  # [B, 8, Q]
+        attn_mask = dist[:, None, :, :] * tau[..., None]  # [B, 8, Q, K]
+
+        attn_mask = attn_mask.flatten(0, 1)  # [Bx8, Q, K]
+        
+        return self.attention(query_feat, temp_feat, temp_feat, query_pos=query_pos, key_pos=key_pos, attn_mask=attn_mask)
+
+    def forward(self, query_feat, temp_feat, query_pos, key_pos):
+        if self.training and query_feat.requires_grad:
+            return cp(self.inner_forward,  query_feat, temp_feat, query_pos, key_pos, use_reentrant=False)
+        else:
+            return self.inner_forward(query_feat, temp_feat, query_pos, key_pos)
+
+    @torch.no_grad()
+    def calc_time_interval(self, query_time_stamp, key_time_stamp, bs, num_query):
+        """
+        query_time_stamp: 0  
+        key_time_stamp: [1, 2, ..., T]
+        """
+        dist = key_time_stamp[None, :] - query_time_stamp[:, None] # [1, T]
+        dist = dist[None, :, :].expand(bs, num_query, -1).repeat_interleave(self.num_per_frame, dim=-1)  # [B, Q, K]
+
+        dist = -dist  # [B, Q, K]
+
+        return dist
 
 class SparseBEVSampling(BaseModule):
     """Adaptive Spatio-temporal Sampling"""
-    def __init__(self, embed_dims=256, num_frames=4, num_groups=4, num_points=8, num_levels=4, pc_range=[], init_cfg=None):
+    def __init__(self, embed_dims=256, num_frames=4, num_groups=4, num_points=8, num_levels=4, num_views=6, pc_range=[], init_cfg=None):
         super().__init__(init_cfg)
 
         self.num_frames = num_frames
         self.num_points = num_points
         self.num_groups = num_groups
         self.num_levels = num_levels
+        self.num_views = num_views
         self.pc_range = pc_range
 
         self.sampling_offset = nn.Linear(embed_dims, num_groups * num_points * 3)
@@ -272,6 +361,7 @@ class SparseBEVSampling(BaseModule):
         query_bbox: [B, Q, 10]
         query_feat: [B, Q, C]
         '''
+        #assert mlvl_feats[0].shape[1] % self.num_views == 0
         B, Q = query_bbox.shape[:2]
         image_h, image_w, _ = img_metas[0]['img_shape'][0]
 
@@ -279,25 +369,11 @@ class SparseBEVSampling(BaseModule):
         sampling_offset = self.sampling_offset(query_feat)
         sampling_offset = sampling_offset.view(B, Q, self.num_groups * self.num_points, 3)
         sampling_points = make_sample_points(query_bbox, sampling_offset, self.pc_range)  # [B, Q, GP, 3]
-        sampling_points = sampling_points.reshape(B, Q, 1, self.num_groups, self.num_points, 3)
-        sampling_points = sampling_points.expand(B, Q, self.num_frames, self.num_groups, self.num_points, 3)
-
-        # warp sample points based on velocity
-        time_diff = img_metas[0]['time_diff']  # [B, F]
-        time_diff = time_diff[:, None, :, None]  # [B, 1, F, 1]
-        vel = query_bbox[..., 8:].detach()  # [B, Q, 2]
-        vel = vel[:, :, None, :]  # [B, Q, 1, 2]
-        dist = vel * time_diff  # [B, Q, F, 2]
-        dist = dist[:, :, :, None, None, :]  # [B, Q, F, 1, 1, 2]
-        sampling_points = torch.cat([
-            sampling_points[..., 0:2] - dist,
-            sampling_points[..., 2:3]
-        ], dim=-1)
 
         # scale weights
-        scale_weights = self.scale_weights(query_feat).view(B, Q, self.num_groups, 1, self.num_points, self.num_levels)
+        scale_weights = self.scale_weights(query_feat).view(B, Q, self.num_groups, self.num_points, self.num_levels)
         scale_weights = torch.softmax(scale_weights, dim=-1)
-        scale_weights = scale_weights.expand(B, Q, self.num_groups, self.num_frames, self.num_points, self.num_levels)
+        #scale_weights = scale_weights.expand(B, Q, self.num_groups, self.num_frames, self.num_points, self.num_levels)
 
         # sampling
         sampled_feats = sampling_4d(
@@ -305,7 +381,8 @@ class SparseBEVSampling(BaseModule):
             mlvl_feats,
             scale_weights,
             img_metas[0]['lidar2img'],
-            image_h, image_w
+            image_h, image_w,
+            self.num_views
         )  # [B, Q, G, FP, C]
 
         return sampled_feats
