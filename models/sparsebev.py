@@ -8,6 +8,8 @@ from mmdet.models import DETECTORS
 from mmdet3d.core import bbox3d2result
 from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
 from .utils import GridMask, pad_multiple, GpuPhotoMetricDistortion
+from mmcv.utils import build_from_cfg
+from mmcv.cnn.bricks.registry import PLUGIN_LAYERS
 
 
 @DETECTORS.register_module()
@@ -28,6 +30,12 @@ class SparseBEV(MVXTwoStageDetector):
                  img_rpn_head=None,
                  train_cfg=None,
                  test_cfg=None,
+                 num_frame_head_grads=2,
+                 num_frame_backbone_grads=2,
+                 num_frame_losses=2,
+                 stride=16,
+                 aux_2d_loss=True,
+                 depth_branch=None,
                  pretrained=None):
         super(SparseBEV, self).__init__(pts_voxel_layer, pts_voxel_encoder,
                              pts_middle_encoder, pts_fusion_layer,
@@ -41,7 +49,20 @@ class SparseBEV(MVXTwoStageDetector):
         self.use_grid_mask = True
 
         self.memory = {}
-        self.queue = queue.Queue()
+        #self.queue = queue.Queue()
+
+        self.num_frame_head_grads = num_frame_head_grads
+        self.num_frame_backbone_grads = num_frame_backbone_grads
+        self.num_frame_losses = num_frame_losses
+        self.prev_scene_token = None
+        self.test_flag = False
+        self.aux_2d_loss = aux_2d_loss
+        self.stride = stride
+
+        if depth_branch is not None:
+            self.depth_branch = build_from_cfg(depth_branch, PLUGIN_LAYERS)
+        else:
+            self.depth_branch = None
 
     @auto_fp16(apply_to=('img'), out_fp32=True)
     def extract_img_feat(self, img):
@@ -58,7 +79,7 @@ class SparseBEV(MVXTwoStageDetector):
 
         return img_feats
 
-    def extract_feat(self, img, img_metas):
+    def extract_feat(self, img, img_metas, return_depth=False):
         if isinstance(img, list):
             img = torch.stack(img, dim=0)
 
@@ -85,26 +106,19 @@ class SparseBEV(MVXTwoStageDetector):
                 img = img - norm_mean.reshape(1, 3, 1, 1)
                 img = img / norm_std.reshape(1, 3, 1, 1)
 
-            for b in range(B):
-                img_shape = (img.shape[2], img.shape[3], img.shape[1])
-                img_metas[b]['img_shape'] = [img_shape for _ in range(N)]
-                img_metas[b]['ori_shape'] = [img_shape for _ in range(N)]
-
             if 'img_pad_cfg' in self.data_aug:
                 img_pad_cfg = self.data_aug['img_pad_cfg']
-                img = pad_multiple(img, img_metas, size_divisor=img_pad_cfg['size_divisor'])
+                img = pad_multiple(img, img_metas, size_divisor=img_pad_cfg['size_divisor'], training=self.training)
 
         input_shape = img.shape[-2:]
-        # update real input shape of each single img
-        for img_meta in img_metas:
-            img_meta.update(input_shape=input_shape)
 
         if self.training and self.stop_prev_grad > 0:
+            assert False
             H, W = input_shape
             img = img.reshape(B, -1, 6, C, H, W)
 
-            img_grad = img[:, :self.stop_prev_grad]
-            img_nograd = img[:, self.stop_prev_grad:]
+            img_grad = img[:, -self.num_frame_backbone_grads:]  
+            img_nograd = img[:, :-self.num_frame_backbone_grads]  
 
             all_img_feats = [self.extract_img_feat(img_grad.reshape(-1, C, H, W))]
 
@@ -129,13 +143,61 @@ class SparseBEV(MVXTwoStageDetector):
             img_feats_reshaped.append(img_feat.view(B, int(BN / B), C, H, W))
 
         return img_feats_reshaped
+    
+    def obtain_history_memory(self,
+                            gt_bboxes_3d=None,
+                            gt_labels_3d=None,
+                            img_metas=None,
+                            gt_bboxes_ignore=None,
+                            **data):
+        losses = dict()
+        B, T, N = data['img'].shape[:3]
+        
+        num_nograd_frames = T - self.num_frame_head_grads
+        num_grad_losses = T - self.num_frame_losses
+        for i in range(T):
+            requires_grad = False
+            return_losses = False
+            data_t = dict()
+            for key in data:
+                if key != 'img_feats':
+                    data_t[key] = data[key][:, i] 
+
+            # img_feats[lvl] : [B, T*N, C, H, W]
+            mlvl_feats = []
+            for lvl in range(len(data['img_feats'])):
+                img_feat_t = data['img_feats'][lvl][:, i*N: i*N + N, ...]  # [B, N, C, H, W]
+                mlvl_feats.append(img_feat_t)
+
+            for b in range(B):
+                img_metas[i][b]['gt_bboxes_3d'] = gt_bboxes_3d[i][b]
+                img_metas[i][b]['gt_labels_3d'] = gt_labels_3d[i][b]
+           
+            data_t['img_feats'] = mlvl_feats
+            if i >= num_nograd_frames:
+                requires_grad = True
+            if i >= num_grad_losses:
+                return_losses = True
+
+            loss = self.forward_pts_train(gt_bboxes_3d[i], gt_labels_3d[i], img_metas[i], gt_bboxes_ignore,
+                                        requires_grad=requires_grad, return_losses=return_losses,
+                                        **data_t)
+            if loss is not None:
+                if T > 1:  # sliding window training
+                    for key, value in loss.items():
+                        losses['frame_'+str(i)+"_"+key] = value
+                else:
+                    losses = loss
+        return losses
 
     def forward_pts_train(self,
-                          pts_feats,
                           gt_bboxes_3d,
                           gt_labels_3d,
                           img_metas,
-                          gt_bboxes_ignore=None):
+                          gt_bboxes_ignore=None,
+                          requires_grad=True,
+                          return_losses=False,
+                          **data):
         """Forward function for point cloud branch.
         Args:
             pts_feats (list[torch.Tensor]): Features of point cloud branch
@@ -149,11 +211,21 @@ class SparseBEV(MVXTwoStageDetector):
         Returns:
             dict: Losses of each branch.
         """
-        outs = self.pts_bbox_head(pts_feats, img_metas)
-        loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
-        losses = self.pts_bbox_head.loss(*loss_inputs)
+        if not requires_grad:
+            self.eval()
+            with torch.no_grad():
+                outs = self.pts_bbox_head(img_metas, **data)
+            self.train()
+        else:
+            outs = self.pts_bbox_head(img_metas, **data)
 
-        return losses
+        if return_losses:
+            loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
+            losses = self.pts_bbox_head.loss(*loss_inputs)
+
+            return losses
+        else:
+            return None
 
     @force_fp32(apply_to=('img', 'points'))
     def forward(self, return_loss=True, **kwargs):
@@ -167,22 +239,19 @@ class SparseBEV(MVXTwoStageDetector):
         augmentations.
         """
         if return_loss:
+            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'img_metas']:
+                kwargs[key] = list(zip(*kwargs[key]))
             return self.forward_train(**kwargs)
         else:
             return self.forward_test(**kwargs)
 
     def forward_train(self,
-                      points=None,
                       img_metas=None,
                       gt_bboxes_3d=None,
                       gt_labels_3d=None,
-                      gt_labels=None,
-                      gt_bboxes=None,
                       img=None,
-                      proposals=None,
                       gt_bboxes_ignore=None,
-                      img_depth=None,
-                      img_mask=None):
+                      **data):
         """Forward training function.
         Args:
             points (list[torch.Tensor], optional): Points of each sample.
@@ -206,26 +275,41 @@ class SparseBEV(MVXTwoStageDetector):
         Returns:
             dict: Losses of different branches.
         """
+        if self.test_flag: # for interval evaluation
+            self.pts_bbox_head.reset_memory()
+            self.test_flag = False
+            self.prev_scene_token = None  # NOTE important when use different bs and custom_gpu_test in interval eval
+
+        B, queue_len, N, C, H, W = img.size()
+        data['img'] = img
+        img = img.reshape(B, queue_len*N, C, H, W)
         img_feats = self.extract_feat(img, img_metas)
-
-        for i in range(len(img_metas)):
-            img_metas[i]['gt_bboxes_3d'] = gt_bboxes_3d[i]
-            img_metas[i]['gt_labels_3d'] = gt_labels_3d[i]
-
-        losses = self.forward_pts_train(img_feats, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore)
+        data['img_feats'] = img_feats
+        
+        losses = self.obtain_history_memory(gt_bboxes_3d, gt_labels_3d,
+                                            img_metas, gt_bboxes_ignore, **data)
 
         return losses
 
-    def forward_test(self, img_metas, img=None, **kwargs):
+    def forward_test(self, img_metas, img=None, rescale=False, **data):
+        if not self.test_flag: # for interval evaluation
+            self.pts_bbox_head.reset_memory()
+            self.test_flag = True
+        
         for var, name in [(img_metas, 'img_metas')]:
             if not isinstance(var, list):
                 raise TypeError('{} must be a list, but got {}'.format(
                     name, type(var)))
         img = [img] if img is None else img
-        return self.simple_test(img_metas[0], img[0], **kwargs)
+    
+        for key in data.keys():
+            data[key] = data[key][0][0].unsqueeze(0)
+            
+        data['img'] = img[0]
+        return self.simple_test(img_metas[0], rescale, **data)
 
-    def simple_test_pts(self, x, img_metas, rescale=False):
-        outs = self.pts_bbox_head(x, img_metas)
+    def simple_test_pts(self, img_metas, rescale=False, **data):
+        outs = self.pts_bbox_head(img_metas, **data)
         bbox_list = self.pts_bbox_head.get_bboxes(outs, img_metas[0], rescale=rescale)
 
         bbox_results = [
@@ -235,87 +319,19 @@ class SparseBEV(MVXTwoStageDetector):
 
         return bbox_results
     
-    def simple_test(self, img_metas, img=None, rescale=False):
-        world_size = get_dist_info()[1]
-        if world_size == 1:  # online
-            return self.simple_test_online(img_metas, img, rescale)
-        else:  # offline
-            return self.simple_test_offline(img_metas, img, rescale)
-
-    def simple_test_offline(self, img_metas, img=None, rescale=False):
-        img_feats = self.extract_feat(img=img, img_metas=img_metas)
+    def simple_test(self, img_metas, rescale=False, **data):
+        img_feats = self.extract_feat(img=data['img'], img_metas=img_metas)
+        data['img_feats'] = img_feats
 
         bbox_list = [dict() for _ in range(len(img_metas))]
-        bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale)
+        bbox_pts = self.simple_test_pts(img_metas, rescale=rescale, **data)
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
-
-        return bbox_list
-
-    def simple_test_online(self, img_metas, img=None, rescale=False):
-        self.fp16_enabled = False
-        assert len(img_metas) == 1  # batch_size = 1
-
-        B, N, C, H, W = img.shape
-        img = img.reshape(B, N//6, 6, C, H, W)
-
-        img_filenames = img_metas[0]['filename']
-        num_frames = len(img_filenames) // 6
-        # assert num_frames == img.shape[1]
-
-        img_shape = (H, W, C)
-        img_metas[0]['img_shape'] = [img_shape for _ in range(len(img_filenames))]
-        img_metas[0]['ori_shape'] = [img_shape for _ in range(len(img_filenames))]
-        img_metas[0]['pad_shape'] = [img_shape for _ in range(len(img_filenames))]
-
-        img_feats_list, img_metas_list = [], []
-
-        # extract feature frame by frame
-        for i in range(num_frames):
-            img_indices = list(np.arange(i * 6, (i + 1) * 6))
-
-            img_metas_curr = [{}]
-            for k in img_metas[0].keys():
-                if isinstance(img_metas[0][k], list):
-                    img_metas_curr[0][k] = [img_metas[0][k][i] for i in img_indices]
-
-            if img_filenames[img_indices[0]] in self.memory:
-                # found in memory
-                img_feats_curr = self.memory[img_filenames[img_indices[0]]]
-            else:
-                # extract feature and put into memory
-                img_feats_curr = self.extract_feat(img[:, i], img_metas_curr)
-                self.memory[img_filenames[img_indices[0]]] = img_feats_curr
-                self.queue.put(img_filenames[img_indices[0]])
-                while self.queue.qsize() >= 16:  # avoid OOM
-                    pop_key = self.queue.get()
-                    self.memory.pop(pop_key)
-
-            img_feats_list.append(img_feats_curr)
-            img_metas_list.append(img_metas_curr)
-
-        # reorganize
-        feat_levels = len(img_feats_list[0])
-        img_feats_reorganized = []
-        for j in range(feat_levels):
-            feat_l = torch.cat([img_feats_list[i][j] for i in range(len(img_feats_list))], dim=0)
-            feat_l = feat_l.flatten(0, 1)[None, ...]
-            img_feats_reorganized.append(feat_l)
-
-        img_metas_reorganized = img_metas_list[0]
-        for i in range(1, len(img_metas_list)):
-            for k, v in img_metas_list[i][0].items():
-                if isinstance(v, list):
-                    img_metas_reorganized[0][k].extend(v)
-
-        img_feats = img_feats_reorganized
-        img_metas = img_metas_reorganized
-        img_feats = cast_tensor_type(img_feats, torch.half, torch.float32)
-
-        # run detector
-        bbox_list = [dict() for _ in range(1)]
-        bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale)
-        for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
-            result_dict['pts_bbox'] = pts_bbox
+            
+            if pts_bbox['boxes_3d'].box_dim < 9:  # waymo bbox
+                result_dict['sample_idx'] = img_metas[0]['sample_idx']
+                result_dict['context_name'] = img_metas[0]['context_name']
+                #result_dict['timestamp'] = str(img_metas[0]['timestamp'].data.item()*1e6)
+                result_dict['timestamp'] = format(img_metas[0]['timestamp'].data.item()*1e6, ".0f")
 
         return bbox_list

@@ -2,17 +2,29 @@
 
 [![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/sparsebev-high-performance-sparse-3d-object/3d-object-detection-on-nuscenes-camera-only)](https://paperswithcode.com/sota/3d-object-detection-on-nuscenes-camera-only?p=sparsebev-high-performance-sparse-3d-object)
 
-This is the official PyTorch implementation for our ICCV 2023 paper:
+This is the official PyTorch implementation for our two papers:
 
-> [**SparseBEV: High-Performance Sparse 3D Object Detection from Multi-Camera Videos**](https://arxiv.org/abs/2308.09244)<br>
-> [Haisong Liu](https://scholar.google.com/citations?user=Z9yWFA0AAAAJ&hl=en&oi=sra), [Yao Teng](https://scholar.google.com/citations?user=eLIsViIAAAAJ&hl=en&oi=sra), [Tao Lu](https://scholar.google.com/citations?user=Ch28NiIAAAAJ&hl=en&oi=sra), [Haiguang Wang](https://miraclesinwang.github.io/), [Limin Wang](https://scholar.google.com/citations?user=HEuN8PcAAAAJ&hl=en&oi=sra)<br>Nanjing University, Shanghai AI Lab
+* Conference version: [SparseBEV: High-Performance Sparse 3D Object Detection from Multi-Camera Videos](https://arxiv.org/abs/2308.09244). (ICCV 2023)
+
+* Extended version: SparseBEV: A Fully Sparse Framework for
+Multi-View 3D Object Detection. (TPAMI 2026)
 
 中文解读：[https://zhuanlan.zhihu.com/p/654821380](https://zhuanlan.zhihu.com/p/654821380)
 
 ![](asserts/banner.jpg)
 
+## Changes to the Conference Paper
+
+In this journal version (**SparseBEV++**), we introduce improvements in the following aspects:
+
+1. **Temporal modeling:** We extend the temporal modeling from a sampling-point-based multi-frame stacking strategy to a query-based recurrent approach, which improves inference speed and achieves superior performance.
+2. **Scale‑adaptive cross attention:** A scale‑adaptive mechanism is introduced along the temporal dimension, enabling query-based temporal interactions that adaptively aggregate historical information for better detection accuracy.
+3. **Waymo evaluation:** Extensive experiments on the Waymo Open Dataset demonstrate the robustness and generalization of SparseBEV++ across diverse scenarios.
+4. **Efficiency analysis:** Rigorous experiments validate robustness against cumulative ego-pose noise, and comprehensive complexity analysis (FLOPs and memory) highlights the efficiency advantages of our fully sparse framework over dense counterparts.
+
 ## News
 
+* 2026-05-10: We release **SparseBEV++**, an enhanced version with better performance. The code and configs are now available on the `v2` branch. 🎉 SparseBEV++ has been accepted by TPAMI.
 * 2024-03-31: The code of SparseOcc is released at [https://github.com/MCG-NJU/SparseOcc](https://github.com/MCG-NJU/SparseOcc).
 * 2023-12-29: Check out our new paper ([https://arxiv.org/abs/2312.17118](https://arxiv.org/abs/2312.17118)) to learn about SparseOcc, a fully sparse architecture for panoptic occupancy!
 * 2023-10-20: We provide code for visualizing the predictions and the sampling points, as requested in [#25](https://github.com/MCG-NJU/SparseBEV/issues/25).
@@ -22,6 +34,17 @@ This is the official PyTorch implementation for our ICCV 2023 paper:
 * 2023-02-09: SparseBEV-Beta achieves 65.6 NDS on [the nuScenes leaderboard](https://eval.ai/web/challenges/challenge-page/356/leaderboard/1012).
 
 ## Model Zoo
+
+### SparseBEV++
+
+| Setting  | Training Cost | NDS<sub>val</sub> | mAP | FLOPs | Memory | Weights |
+|----------|:-------------:|:-----------------:|:---:|:-----:|:------:|:-------:|
+| [r50_nuimg_704x256_memory_8x256](configs/r50_nuimg_704x256_memory_8x256.py) | 14h (8x4090Ti) | 57.4 | 47.5 | 411.8G | 657.9M | [gdrive](https://drive.google.com/file/d/1ft34-pxLpHGo2Aw-jowEtCxyXcqszHNn/view) |
+| r101_nuimg_1408x512 | - | 60.0 | 51.5 | - | - | - |
+
+* We use `r50_nuimg_704x256_memory_8x256` for ablation studies and `r50_nuimg_704x256_memory_4x256` for comparison with others.
+
+### SparseBEV
 
 | Setting  | Pretrain | Training Cost | NDS<sub>val</sub> | NDS<sub>test</sub> | FPS | Weights |
 |----------|:--------:|:-------------:|:-----------------:|:------------------:|:---:|:-------:|
@@ -35,6 +58,7 @@ This is the official PyTorch implementation for our ICCV 2023 paper:
 * We recommend using `r50_nuimg_704x256` to validate new ideas since it trains faster and the result is more stable.
 * FPS is measured with AMD 5800X CPU and RTX 3090 GPU (without `fp16`).
 * The noise is around 0.3 NDS.
+
 
 ## Environment
 

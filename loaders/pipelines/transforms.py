@@ -239,6 +239,9 @@ class RandomTransformImage(object):
                 )
                 results['img'][i] = np.array(img).astype(np.uint8)
                 results['lidar2img'][i] = ida_mat @ results['lidar2img'][i]
+                
+                if "cam_intrinsic" in results:
+                    results["cam_intrinsic"][i][:3, :3] *= resize
 
         elif len(results['img']) == 6:
             for i in range(len(results['img'])):
@@ -257,6 +260,8 @@ class RandomTransformImage(object):
 
             for i in range(len(results['lidar2img'])):
                 results['lidar2img'][i] = ida_mat @ results['lidar2img'][i]
+                if "cam_intrinsic" in results:
+                    results["cam_intrinsic"][i][:3, :3] *= resize
 
         else:
             raise ValueError()
@@ -378,6 +383,9 @@ class GlobalRotScaleTransImage(object):
         ])
         rot_mat_inv = torch.inverse(rot_mat)
 
+        results['ego_pose'] = (torch.tensor(results["ego_pose"]).float() @ rot_mat_inv).numpy()
+        results['ego_pose_inv'] = (rot_mat.float() @ torch.tensor(results["ego_pose_inv"])).numpy()
+
         for view in range(len(results['lidar2img'])):
             results['lidar2img'][view] = (torch.tensor(results['lidar2img'][view]).float() @ rot_mat_inv).numpy()
 
@@ -389,6 +397,9 @@ class GlobalRotScaleTransImage(object):
             [0, 0, 0, 1],
         ])
         scale_mat_inv = torch.inverse(scale_mat)
+
+        results['ego_pose'] = (torch.tensor(results["ego_pose"]).float() @ scale_mat_inv).numpy()
+        results['ego_pose_inv'] = (scale_mat @ torch.tensor(results["ego_pose_inv"]).float()).numpy()
 
         for view in range(len(results['lidar2img'])):
             results['lidar2img'][view] = (torch.tensor(results['lidar2img'][view]).float() @ scale_mat_inv).numpy()
