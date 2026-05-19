@@ -39,7 +39,7 @@ In this journal version (**SparseBEV++**), we introduce improvements in the foll
 
 | Setting  | Training Cost | NDS<sub>val</sub> | mAP | FLOPs | Memory | Weights |
 |----------|:-------------:|:-----------------:|:---:|:-----:|:------:|:-------:|
-| [r50_nuimg_704x256_memory_8x256](configs/r50_nuimg_704x256_memory_8x256.py) | 14h (8x4090) | 57.4 | 47.5 | 411.8G | 657.9M | [gdrive](https://drive.google.com/file/d/1ft34-pxLpHGo2Aw-jowEtCxyXcqszHNn/view) |
+| [r50_nuimg_704x256_memory_8x256](configs/r50_nuimg_704x256_memory_8x256.py) | 14h (8x4090) | 57.4 | 47.5 | 411.8G | 657.9M | [gdrive](https://drive.google.com/file/d/1IzLuHHB-kPoXBbSoa0W5FTX1kvKoFIqg/view) |
 | r101_nuimg_1408x512 | - | 60.0 | 51.5 | - | - | - |
 
 * We use `r50_nuimg_704x256_memory_8x256` for ablation studies and `r50_nuimg_704x256_memory_4x256` for comparison with others.
