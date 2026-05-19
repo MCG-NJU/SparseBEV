@@ -6,8 +6,7 @@ This is the official PyTorch implementation for our two papers:
 
 * Conference version: [SparseBEV: High-Performance Sparse 3D Object Detection from Multi-Camera Videos](https://arxiv.org/abs/2308.09244). (ICCV 2023)
 
-* Extended version: SparseBEV: A Fully Sparse Framework for
-Multi-View 3D Object Detection. (TPAMI 2026)
+* Extended version: [SparseBEV: A Fully Sparse Framework for Multi-View 3D Object Detection](https://ieeexplore.ieee.org/document/11460277). (TPAMI 2026)
 
 中文解读：[https://zhuanlan.zhihu.com/p/654821380](https://zhuanlan.zhihu.com/p/654821380)
 
